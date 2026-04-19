@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-04-19
+
+### Added
+- **Primary injection path via `llm_output`**: the hook now also mutates
+  `event.assistantTexts[last]` and `event.lastAssistant.text` in place.
+  `llm_output` runs handlers synchronously inside `hooks.map(async …)`, so
+  the mutation lands before the core resumes — the footer propagates
+  through every downstream outbound adapter, including channels that
+  skip the `message_sending` hook.
+- Anti-duplicate guard: `message_sending` now SKIPs when the outbound
+  content already contains the footer's first line. Short follow-up
+  chunks that miss `llm_output` mutation still get the footer via the
+  `message_sending` fallback.
+- `debug` plugin config flag. When true, emits `llm_output FIRE/STASH/
+  MUTATE` and `message_sending FIRE/APPEND/SKIP/MISS` traces to the
+  gateway log for diagnosing where injection drops off.
+
+### Fixed
+- Footer now reliably appears on Discord outbound, which did not invoke
+  `message_sending` in every code path. Verified against live traffic
+  (main agent, qwen3.6-plus model).
+
 ## [1.0.0] — 2026-04-19
 
 ### Added

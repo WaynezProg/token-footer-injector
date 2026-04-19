@@ -225,6 +225,7 @@ function register(api) {
   const skipChannels = new Set(config.skipChannels ?? []);
   const cap = typeof config.maxMessageLength === "number" && config.maxMessageLength > 0 ? config.maxMessageLength : void 0;
   const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
+  const debug = config.debug === true;
   const stash = new UsageStash(ttlMs);
   if (typeof api.on !== "function") {
     warn("api.on not available on this host \u2014 plugin disabled");
@@ -235,10 +236,14 @@ function register(api) {
     (event, ctx) => {
       const ev = event;
       const cx = ctx;
+      if (debug) log(`llm_output FIRE agentId=${cx?.agentId} channelId=${cx?.channelId} sessionKey=${cx?.sessionKey} model=${ev?.model} usage=${JSON.stringify(ev?.usage)}`);
       if (cx?.agentId && skipAgents.has(cx.agentId)) return;
       if (cx?.channelId && skipChannels.has(cx.channelId)) return;
       const usage = normalizeUsage(ev?.usage);
-      if (!usage) return;
+      if (!usage) {
+        if (debug) log(`llm_output SKIP: usage could not be normalized`);
+        return;
+      }
       const entry = {
         usage,
         model: ev.model ?? "unknown",
@@ -251,6 +256,22 @@ function register(api) {
       if (cx?.agentId) keys.push(`agent:${cx.agentId}`);
       if (cx?.channelId) keys.push(`channel:${cx.channelId}`);
       stash.set(keys, entry);
+      if (debug) log(`llm_output STASH keys=[${keys.join(",")}] size=${stash.size()}`);
+      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
+      if (!footer) return;
+      const firstLine = footer.split("\n", 1)[0];
+      const texts = ev.assistantTexts;
+      const tail = Array.isArray(texts) && texts.length > 0 ? texts[texts.length - 1] : void 0;
+      if (typeof tail === "string" && !tail.includes(firstLine)) {
+        const next = applyFooter(tail, footer, cap);
+        texts[texts.length - 1] = next;
+        if (ev.lastAssistant && typeof ev.lastAssistant === "object" && typeof ev.lastAssistant.text === "string" && !ev.lastAssistant.text.includes(firstLine)) {
+          ev.lastAssistant.text = applyFooter(ev.lastAssistant.text, footer, cap);
+        }
+        if (debug) log(`llm_output MUTATE assistantTexts[last] appended footer`);
+      } else if (debug) {
+        log(`llm_output MUTATE skip: tail already contains footer or no tail text`);
+      }
     }
   );
   api.on(
@@ -259,19 +280,29 @@ function register(api) {
       const ev = event;
       const cx = ctx;
       const chan = cx?.channelId ?? ev?.metadata?.channel;
+      if (debug) log(`message_sending FIRE to=${ev?.to} channelId=${cx?.channelId} metaChannel=${ev?.metadata?.channel} accountId=${cx?.accountId} contentLen=${ev?.content?.length ?? 0}`);
       if (chan && skipChannels.has(chan)) return;
       const keys = [];
       if (chan) keys.push(`channel:${chan}`);
       const entry = stash.get(keys);
-      if (!entry) return;
+      if (!entry) {
+        if (debug) log(`message_sending MISS: no stash entry for keys=[${keys.join(",")}], stashSize=${stash.size()}`);
+        return;
+      }
       const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
       const originalContent = typeof ev.content === "string" ? ev.content : "";
+      const firstLine = footer.split("\n", 1)[0];
+      if (originalContent.includes(firstLine)) {
+        if (debug) log(`message_sending SKIP: content already contains footer`);
+        return;
+      }
       const nextContent = applyFooter(originalContent, footer, cap);
+      if (debug) log(`message_sending APPEND: footer='${firstLine}' appended`);
       return { content: nextContent };
     },
     { priority: 100 }
   );
-  log(`v1.0 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}`);
+  log(`v1.0.1 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

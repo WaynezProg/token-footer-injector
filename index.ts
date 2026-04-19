@@ -72,6 +72,7 @@ interface PluginConfig {
   maxMessageLength?: number;
   usageTtlMs?: number;
   locale?: "en" | "zh-TW";
+  debug?: boolean;
 }
 
 interface LlmOutputEvent {
@@ -80,7 +81,7 @@ interface LlmOutputEvent {
   provider?: string;
   model?: string;
   assistantTexts?: string[];
-  lastAssistant?: unknown;
+  lastAssistant?: { text?: string; [key: string]: unknown } | null;
   usage?: RawUsage;
 }
 
@@ -409,6 +410,7 @@ export default function register(api: OpenClawApi): void {
   const skipChannels = new Set(config.skipChannels ?? []);
   const cap = typeof config.maxMessageLength === "number" && config.maxMessageLength > 0 ? config.maxMessageLength : undefined;
   const locale: "en" | "zh-TW" = config.locale === "zh-TW" ? "zh-TW" : "en";
+  const debug = config.debug === true;
 
   const stash = new UsageStash(ttlMs);
 
@@ -425,10 +427,14 @@ export default function register(api: OpenClawApi): void {
     (event: unknown, ctx: unknown) => {
       const ev = event as LlmOutputEvent;
       const cx = ctx as LlmOutputCtx;
+      if (debug) log(`llm_output FIRE agentId=${cx?.agentId} channelId=${cx?.channelId} sessionKey=${cx?.sessionKey} model=${ev?.model} usage=${JSON.stringify(ev?.usage)}`);
       if (cx?.agentId && skipAgents.has(cx.agentId)) return;
       if (cx?.channelId && skipChannels.has(cx.channelId)) return;
       const usage = normalizeUsage(ev?.usage);
-      if (!usage) return;
+      if (!usage) {
+        if (debug) log(`llm_output SKIP: usage could not be normalized`);
+        return;
+      }
       const entry: StashEntry = {
         usage,
         model: ev.model ?? "unknown",
@@ -442,6 +448,29 @@ export default function register(api: OpenClawApi): void {
       if (cx?.agentId) keys.push(`agent:${cx.agentId}`);
       if (cx?.channelId) keys.push(`channel:${cx.channelId}`);
       stash.set(keys, entry);
+      if (debug) log(`llm_output STASH keys=[${keys.join(",")}] size=${stash.size()}`);
+
+      // --- Primary injection path ---
+      // Many outbound adapters (notably Discord) skip `message_sending`. The
+      // llm_output hook runs void-parallel: handlers execute synchronously
+      // inside `hooks.map(async ...)`, so mutating `event.assistantTexts`
+      // (same reference as the core's outer variable) before the handler
+      // yields is enough to have the footer propagated downstream.
+      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
+      if (!footer) return;
+      const firstLine = footer.split("\n", 1)[0];
+      const texts = ev.assistantTexts;
+      const tail = Array.isArray(texts) && texts.length > 0 ? texts[texts.length - 1] : undefined;
+      if (typeof tail === "string" && !tail.includes(firstLine)) {
+        const next = applyFooter(tail, footer, cap);
+        texts![texts!.length - 1] = next;
+        if (ev.lastAssistant && typeof ev.lastAssistant === "object" && typeof ev.lastAssistant.text === "string" && !ev.lastAssistant.text.includes(firstLine)) {
+          ev.lastAssistant.text = applyFooter(ev.lastAssistant.text, footer, cap);
+        }
+        if (debug) log(`llm_output MUTATE assistantTexts[last] appended footer`);
+      } else if (debug) {
+        log(`llm_output MUTATE skip: tail already contains footer or no tail text`);
+      }
     },
   );
 
@@ -454,20 +483,32 @@ export default function register(api: OpenClawApi): void {
       const ev = event as MessageSendingEvent;
       const cx = ctx as MessageSendingCtx;
       const chan = cx?.channelId ?? ev?.metadata?.channel;
+      if (debug) log(`message_sending FIRE to=${ev?.to} channelId=${cx?.channelId} metaChannel=${ev?.metadata?.channel} accountId=${cx?.accountId} contentLen=${ev?.content?.length ?? 0}`);
       if (chan && skipChannels.has(chan)) return;
 
       const keys: string[] = [];
       if (chan) keys.push(`channel:${chan}`);
       const entry = stash.get(keys);
-      if (!entry) return;
+      if (!entry) {
+        if (debug) log(`message_sending MISS: no stash entry for keys=[${keys.join(",")}], stashSize=${stash.size()}`);
+        return;
+      }
 
       const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
       const originalContent = typeof ev.content === "string" ? ev.content : "";
+      // Guard against double-injection: if llm_output already mutated the
+      // upstream assistantTexts, the content will already carry the footer.
+      const firstLine = footer.split("\n", 1)[0];
+      if (originalContent.includes(firstLine)) {
+        if (debug) log(`message_sending SKIP: content already contains footer`);
+        return;
+      }
       const nextContent = applyFooter(originalContent, footer, cap);
+      if (debug) log(`message_sending APPEND: footer='${firstLine}' appended`);
       return { content: nextContent };
     },
     { priority: 100 },
   );
 
-  log(`v1.0 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}`);
+  log(`v1.0.1 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
 }
