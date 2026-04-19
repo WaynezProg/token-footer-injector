@@ -293,7 +293,8 @@ function register(api) {
         usage,
         model: ev.model ?? "unknown",
         provider: ev.provider ?? "unknown",
-        ts: Date.now()
+        ts: Date.now(),
+        consumed: false
       };
       const keys = [];
       if (cx?.sessionKey) keys.push(`session:${cx.sessionKey}`);
@@ -341,14 +342,19 @@ function register(api) {
         if (debug) log(`message_sending SKIP: content already contains footer`);
         return;
       }
+      if (entry.consumed) {
+        if (debug) log(`message_sending SKIP: stash entry already consumed for this turn`);
+        return;
+      }
+      entry.consumed = true;
       const nextContent = applyFooter(originalContent, footer, cap);
-      if (debug) log(`message_sending APPEND: footer='${firstLine}' appended`);
+      if (debug) log(`message_sending APPEND: footer='${firstLine}' appended (stash consumed)`);
       return { content: nextContent };
     },
     { priority: 100 }
   );
   const hostMapCount = Object.keys(hostMap).length;
-  log(`v1.0.5 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
+  log(`v1.0.6 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

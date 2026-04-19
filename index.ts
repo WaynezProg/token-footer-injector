@@ -59,6 +59,13 @@ interface StashEntry {
   model: string;
   provider: string;
   ts: number;
+  /**
+   * Set by `message_sending` the first time it appends the footer to an
+   * outbound payload for this LLM turn. Subsequent chunks from the same
+   * turn will see this flag and skip appending to avoid footer repetition
+   * when a reply is split across multiple messages.
+   */
+  consumed?: boolean;
 }
 
 interface PluginConfig {
@@ -556,6 +563,7 @@ export default function register(api: OpenClawApi): void {
         model: ev.model ?? "unknown",
         provider: ev.provider ?? "unknown",
         ts: Date.now(),
+        consumed: false,
       };
       // Index by every axis we can. Same entry, multiple lookup keys.
       const keys: string[] = [];
@@ -612,20 +620,32 @@ export default function register(api: OpenClawApi): void {
 
       const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold }, hostMap);
       const originalContent = typeof ev.content === "string" ? ev.content : "";
+      const firstLine = footer.split("\n", 1)[0];
       // Guard against double-injection: if llm_output already mutated the
       // upstream assistantTexts, the content will already carry the footer.
-      const firstLine = footer.split("\n", 1)[0];
+      // This path does NOT consume the stash — the llm_output mutation owns
+      // the final-chunk footer, and we want a non-mutated chunk (if any) to
+      // still receive the footer exactly once.
       if (originalContent.includes(firstLine)) {
         if (debug) log(`message_sending SKIP: content already contains footer`);
         return;
       }
+      // Consume-once: when an LLM reply is split into multiple outbound
+      // chunks, only the first non-footer-bearing chunk gets the footer.
+      // Remaining chunks see `entry.consumed === true` and skip, preventing
+      // the "same footer repeated 6 times" symptom.
+      if (entry.consumed) {
+        if (debug) log(`message_sending SKIP: stash entry already consumed for this turn`);
+        return;
+      }
+      entry.consumed = true;
       const nextContent = applyFooter(originalContent, footer, cap);
-      if (debug) log(`message_sending APPEND: footer='${firstLine}' appended`);
+      if (debug) log(`message_sending APPEND: footer='${firstLine}' appended (stash consumed)`);
       return { content: nextContent };
     },
     { priority: 100 },
   );
 
   const hostMapCount = Object.keys(hostMap).length;
-  log(`v1.0.5 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
+  log(`v1.0.6 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }

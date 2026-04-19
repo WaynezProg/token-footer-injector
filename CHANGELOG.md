@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.6] — 2026-04-19
+
+### Fixed
+- **Footer was repeated on every outbound chunk when a single LLM reply
+  was split into multiple messages** (observed as the same footer line
+  appearing 5-6 times in a row on long `Now let me…` tool-calling
+  replies). `message_sending` APPEND path ran independently per chunk,
+  and since each chunk started without the footer, every one of them
+  received a fresh one.
+- Added a **consume-once** flag on each `StashEntry`: the first
+  non-footer-bearing outbound chunk gets the footer and flips the
+  flag; subsequent chunks from the same LLM turn see the flag and
+  skip. Chunks whose content already contains the footer (most
+  commonly the `assistantTexts[last]` chunk mutated by `llm_output`)
+  still SKIP without consuming, so a non-mutated chunk can still
+  legitimately receive the footer once. Net: each LLM turn produces
+  **at most one APPEND + one mutated chunk** with the footer (usually
+  just one).
+
+### Smoke tests
+- Added a 2nd-chunk assertion that would have failed on 1.0.5 and
+  passes on 1.0.6. 69/69 pass.
+
 ## [1.0.5] — 2026-04-19
 
 ### Changed

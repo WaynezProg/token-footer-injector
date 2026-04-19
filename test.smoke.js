@@ -362,6 +362,15 @@ console.log("register() end-to-end");
   truthy("footer contains model", result.content.includes("claude-opus-4-7"));
   truthy("original body preserved", result.content.includes("Hi Wayne, done!"));
 
+  // Consume-once: a 2nd non-footer outbound from the same turn must not
+  // re-append the footer (previously caused the "same footer repeated 6
+  // times" bug on multi-chunk replies).
+  const secondChunk = hooks.message_sending(
+    { to: "user_xxx", content: "follow-up chunk (no footer)", metadata: { channel: "discord", accountId: "bot" } },
+    { channelId: "discord", accountId: "bot" },
+  );
+  eq("second chunk is not re-appended after stash consumed", secondChunk, undefined);
+
   // Skip channel
   const hooks2 = {};
   const api2 = { on: (n, fn) => { hooks2[n] = fn; }, getConfig: () => ({ skipChannels: ["discord"] }) };
