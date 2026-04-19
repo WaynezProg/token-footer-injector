@@ -148,7 +148,8 @@ const DEFAULT_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "claude-3-opus": 200_000,
   "claude-": 200_000, // prefix fallback
   // OpenAI
-  "gpt-5.4": 400_000,
+  "gpt-5.4-mini": 200_000,
+  "gpt-5.4": 200_000,
   "gpt-5": 256_000,
   "gpt-4.1": 1_000_000,
   "gpt-4o": 128_000,
@@ -167,6 +168,26 @@ const DEFAULT_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "deepseek-": 128_000,
   "minimax-": 245_760,
 };
+
+/**
+ * Providers that report `input_tokens` as the full prompt size (cached
+ * portion already included) and `cache_read_input_tokens` as a subset of
+ * that total — vs. Anthropic's convention where `input_tokens` excludes
+ * the cached portion and `cache_read_input_tokens` is additional.
+ *
+ * We default to "OpenAI-style" because that is what most providers
+ * normalize to, and only switch to summing for Anthropic-style providers.
+ */
+function isAnthropicStyleProvider(provider: string): boolean {
+  if (!provider) return false;
+  const p = provider.toLowerCase();
+  return (
+    p === "anthropic" ||
+    p === "claude-cli" ||
+    p === "claude-code" ||
+    p.startsWith("claude")
+  );
+}
 
 const DEFAULT_FORMATS: Record<"en" | "zh-TW", { format: string; warn: string }> = {
   en: {
@@ -272,10 +293,17 @@ interface FooterVars {
 
 export function buildVars(entry: StashEntry, contextWindow: number): FooterVars & { _pctNum: number } {
   const u = entry.usage;
-  const used = u.input + u.cacheRead + u.cacheWrite;
+  // Anthropic: `input` excludes cache; cacheRead + cacheWrite are additional
+  //   → prompt size = input + cacheRead + cacheWrite
+  //   → cache hit %  = cacheRead / (input + cacheRead + cacheWrite)
+  // OpenAI/Codex/Qwen/etc.: `input` already includes the cached portion; cacheRead is a subset
+  //   → prompt size = input (cacheRead + cacheWrite would double-count)
+  //   → cache hit %  = cacheRead / input
+  const anthropicStyle = isAnthropicStyleProvider(entry.provider);
+  const used = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
+  const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const pctNum = contextWindow > 0 ? (used / contextWindow) * 100 : 0;
-  const totalInput = u.input + u.cacheRead + u.cacheWrite;
-  const cachePctNum = totalInput > 0 ? (u.cacheRead / totalInput) * 100 : 0;
+  const cachePctNum = cacheDenom > 0 ? (u.cacheRead / cacheDenom) * 100 : 0;
   const vars: FooterVars & { _pctNum: number } = {
     model: entry.model || "unknown",
     used: String(used),
@@ -284,7 +312,7 @@ export function buildVars(entry: StashEntry, contextWindow: number): FooterVars 
     maxK: String(Math.round(contextWindow / 1000)),
     pct: String(Math.round(pctNum)),
     in: String(u.input),
-    inK: toK(u.input + u.cacheRead + u.cacheWrite),
+    inK: toK(used),
     out: String(u.output),
     outK: toK(u.output),
     total: String(u.total),
@@ -510,5 +538,5 @@ export default function register(api: OpenClawApi): void {
     { priority: 100 },
   );
 
-  log(`v1.0.1 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
+  log(`v1.0.2 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
 }

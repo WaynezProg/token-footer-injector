@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] — 2026-04-19
+
+### Fixed
+- **Double-count bug on OpenAI/Codex/Qwen/other non-Anthropic providers.**
+  Previously `used = input + cacheRead + cacheWrite` for every provider.
+  That is the Anthropic convention (`input_tokens` excludes cache;
+  `cache_read_input_tokens` and `cache_creation_input_tokens` are
+  additional). OpenAI/Codex/Qwen/GLM/Kimi/DeepSeek/MiniMax all use the
+  opposite convention: `prompt_tokens` / `input_tokens` is the full prompt
+  size with `cache_read_input_tokens` being a subset already contained in
+  it. Adding them together inflated the numbers by the cached portion and
+  could push pct over 100% on sessions with heavy cache hits.
+  `buildVars` now branches on `entry.provider`: Anthropic-style providers
+  sum the three components; everything else uses `input` directly.
+  `cachePct` now divides by the correct denominator for each convention
+  as well.
+- **gpt-5.4 / gpt-5.4-mini context window** corrected from 400k to 200k
+  (the real Codex model window; verified against OpenClaw `/status`).
+- `{inK}` placeholder now reflects the true prompt side (alias of `used`)
+  so it no longer double-counts cache on OpenAI-style providers either.
+
+### Smoke tests
+- Added OpenAI-style test case (gpt-5.4) that would have failed on 1.0.1
+  and passes on 1.0.2: 53k prompt + 40k cache hits → usedK=53 (not 93).
+- Added Qwen test case (default OpenAI-style path).
+
 ## [1.0.1] — 2026-04-19
 
 ### Added

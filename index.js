@@ -46,7 +46,8 @@ var DEFAULT_MODEL_CONTEXT_WINDOWS = {
   "claude-": 2e5,
   // prefix fallback
   // OpenAI
-  "gpt-5.4": 4e5,
+  "gpt-5.4-mini": 2e5,
+  "gpt-5.4": 2e5,
   "gpt-5": 256e3,
   "gpt-4.1": 1e6,
   "gpt-4o": 128e3,
@@ -65,6 +66,11 @@ var DEFAULT_MODEL_CONTEXT_WINDOWS = {
   "deepseek-": 128e3,
   "minimax-": 245760
 };
+function isAnthropicStyleProvider(provider) {
+  if (!provider) return false;
+  const p = provider.toLowerCase();
+  return p === "anthropic" || p === "claude-cli" || p === "claude-code" || p.startsWith("claude");
+}
 var DEFAULT_FORMATS = {
   en: {
     format: "\u{1F4CA} {model} | {usedK}k/{maxK}k ({pct}%) \xB7 {inK}\u2192{outK}k tokens \xB7 cache {cachePct}%",
@@ -114,10 +120,11 @@ function toK(n) {
 }
 function buildVars(entry, contextWindow) {
   const u = entry.usage;
-  const used = u.input + u.cacheRead + u.cacheWrite;
+  const anthropicStyle = isAnthropicStyleProvider(entry.provider);
+  const used = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
+  const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const pctNum = contextWindow > 0 ? used / contextWindow * 100 : 0;
-  const totalInput = u.input + u.cacheRead + u.cacheWrite;
-  const cachePctNum = totalInput > 0 ? u.cacheRead / totalInput * 100 : 0;
+  const cachePctNum = cacheDenom > 0 ? u.cacheRead / cacheDenom * 100 : 0;
   const vars = {
     model: entry.model || "unknown",
     used: String(used),
@@ -126,7 +133,7 @@ function buildVars(entry, contextWindow) {
     maxK: String(Math.round(contextWindow / 1e3)),
     pct: String(Math.round(pctNum)),
     in: String(u.input),
-    inK: toK(u.input + u.cacheRead + u.cacheWrite),
+    inK: toK(used),
     out: String(u.output),
     outK: toK(u.output),
     total: String(u.total),
@@ -302,7 +309,7 @@ function register(api) {
     },
     { priority: 100 }
   );
-  log(`v1.0.1 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
+  log(`v1.0.2 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

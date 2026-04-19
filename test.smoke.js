@@ -77,9 +77,9 @@ eq("override wins", resolveContextWindow("custom-model", { "custom-model": 64000
 eq("fallback", resolveContextWindow("totally-unknown-xxx", undefined, 99999), 99999);
 
 // ---------------------------------------------------------------------------
-// buildVars + renderTemplate
+// buildVars + renderTemplate (Anthropic-style: cache is additional to input)
 // ---------------------------------------------------------------------------
-console.log("buildVars + renderTemplate");
+console.log("buildVars + renderTemplate (Anthropic)");
 {
   const entry = {
     usage: { input: 8000, output: 500, cacheRead: 40000, cacheWrite: 1000, total: 8500 },
@@ -88,14 +88,13 @@ console.log("buildVars + renderTemplate");
     ts: Date.now(),
   };
   const vars = buildVars(entry, 200000);
-  // used = 8000 + 40000 + 1000 = 49000 → 49k, pct = 49000/200000 = 24.5% → 25
+  // Anthropic: used = 8000 + 40000 + 1000 = 49000 → 49k, pct = 49/200 ≈ 25%
   eq("usedK", vars.usedK, "49");
   eq("maxK", vars.maxK, "200");
   eq("pct", vars.pct, "25");
-  // inK in footer = input+cacheRead+cacheWrite = 49k  (so the arrow shows the full prompt size)
   eq("inK", vars.inK, "49");
   eq("outK", vars.outK, "0"); // 500 → < 1k → "0"
-  // cachePct = 40000 / (8000+40000+1000) * 100 = 40000/49000 = 81.6% → 82
+  // cachePct = 40000 / 49000 = 81.6% → 82
   eq("cachePct", vars.cachePct, "82");
   const tmpl = "📊 {model} | {usedK}k/{maxK}k ({pct}%) · {inK}→{outK}k tokens · cache {cachePct}%";
   eq(
@@ -103,6 +102,50 @@ console.log("buildVars + renderTemplate");
     renderTemplate(tmpl, vars),
     "📊 claude-opus-4-7 | 49k/200k (25%) · 49→0k tokens · cache 82%",
   );
+}
+
+// ---------------------------------------------------------------------------
+// buildVars (OpenAI-style: cache is subset of input; do NOT double-count)
+// ---------------------------------------------------------------------------
+console.log("buildVars (OpenAI-style)");
+{
+  // Scenario: gpt-5.4, prompt_tokens=53000 (full prompt, already includes cache),
+  // cache_read_input_tokens=40000 (subset of prompt_tokens).
+  // Previous (buggy) formula: used = 53000 + 40000 + 0 = 93000 → 47% of 200k.
+  // Correct: used = 53000 (cache is subset) → 27% of 200k.
+  const entry = {
+    usage: { input: 53000, output: 500, cacheRead: 40000, cacheWrite: 0, total: 53500 },
+    model: "gpt-5.4",
+    provider: "openai-codex",
+    ts: Date.now(),
+  };
+  const vars = buildVars(entry, 200000);
+  eq("OpenAI usedK (no double count)", vars.usedK, "53");
+  eq("OpenAI pct", vars.pct, "27");          // 53/200 → 26.5 → 27
+  eq("OpenAI inK matches used", vars.inK, "53");
+  // cachePct = cacheRead / input = 40/53 → 75.4 → 75
+  eq("OpenAI cachePct uses input as denom", vars.cachePct, "75");
+
+  // Guard against the old bug: ensure we never show pct > 100 when not
+  // actually over the window.
+  truthy("OpenAI pct never over 100 for a half-full context", Number(vars.pct) < 100);
+}
+
+// ---------------------------------------------------------------------------
+// Qwen (treated as OpenAI-style by default)
+// ---------------------------------------------------------------------------
+console.log("buildVars (qwen default to OpenAI-style)");
+{
+  const entry = {
+    usage: { input: 41419, output: 191, cacheRead: 0, cacheWrite: 0, total: 41610 },
+    model: "qwen3.6-plus",
+    provider: "qwen",
+    ts: Date.now(),
+  };
+  const vars = buildVars(entry, 131072);
+  eq("qwen usedK", vars.usedK, "41");
+  eq("qwen pct", vars.pct, "32"); // 41419/131072 → 31.6 → 32
+  eq("qwen cachePct 0 when no cache", vars.cachePct, "0");
 }
 
 // ---------------------------------------------------------------------------
