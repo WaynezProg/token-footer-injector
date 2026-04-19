@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.5] — 2026-04-19
+
+### Changed
+- **`used`/`pct` now mirror OpenClaw `/status`.** The persisted session
+  `contextTokens` value OpenClaw keeps (and `/status` displays) tracks
+  the **cacheRead portion** only, not the full prompt. 1.0.4 showed the
+  full prompt size (input + cacheRead + cacheWrite), which made the
+  footer read 58% while `/status` read 37% for the same turn. They now
+  match: `{usedK}/{maxK} ({pct}%)` resolves to
+  `cacheRead / contextWindow` (with a fresh-session fallback to `input`
+  when no cache has built up yet). Footer format and placeholders are
+  unchanged.
+- `{inK}` now reports the raw per-turn `input` (= `/status` "Nk in"),
+  not an alias of `used`.
+- `cachePct` still uses the provider-aware denominator so the hit-rate
+  matches `/status` "N% hit".
+
+### Smoke tests
+- Live gpt-5.4 case now resolves to `usedK=74, pct=37, inK=42,
+  cachePct=64` — identical to the `/status` block. Added fresh-session
+  fallback coverage and updated the Anthropic/Qwen/heuristic cases for
+  the new `used` definition. 68/68 pass.
+
 ## [1.0.4] — 2026-04-19
 
 ### Fixed

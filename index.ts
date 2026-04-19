@@ -360,17 +360,24 @@ interface FooterVars {
 
 export function buildVars(entry: StashEntry, contextWindow: number): FooterVars & { _pctNum: number } {
   const u = entry.usage;
-  // Anthropic: `input` excludes cache; cacheRead + cacheWrite are additional
-  //   → prompt size = input + cacheRead + cacheWrite
-  //   → cache hit %  = cacheRead / (input + cacheRead + cacheWrite)
-  // OpenAI/Codex/Qwen/etc.: `input` already includes the cached portion; cacheRead is a subset
-  //   → prompt size = input (cacheRead + cacheWrite would double-count)
-  //   → cache hit %  = cacheRead / input
-  const anthropicStyle = isAnthropicStyleUsage(entry.provider, u);
-  const used = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
-  const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
+  // Context usage is aligned with OpenClaw `/status`:
+  //   /status "Context" = the persisted session cache portion (cacheRead).
+  // We use `cacheRead` when available and fall back to `input` on fresh
+  // turns where no cache has built up yet, so a brand-new session still
+  // reports something meaningful. This makes the footer's `{usedK}/{maxK}
+  // ({pct}%)` numerically identical to `/status`.
+  const used = u.cacheRead > 0 ? u.cacheRead : u.input;
   const pctNum = contextWindow > 0 ? (used / contextWindow) * 100 : 0;
+
+  // Cache hit % — denominator depends on whose convention the provider
+  // follows (Anthropic adds cache to input; OpenAI treats cache as a
+  // subset of input). isAnthropicStyleUsage uses a numeric heuristic to
+  // detect Anthropic-style payloads even when the provider name suggests
+  // otherwise (e.g. openai-codex, which ships anthropic-messages shape).
+  const anthropicStyle = isAnthropicStyleUsage(entry.provider, u);
+  const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const cachePctNum = cacheDenom > 0 ? (u.cacheRead / cacheDenom) * 100 : 0;
+
   const vars: FooterVars & { _pctNum: number } = {
     model: entry.model || "unknown",
     used: String(used),
@@ -378,8 +385,10 @@ export function buildVars(entry: StashEntry, contextWindow: number): FooterVars 
     max: String(contextWindow),
     maxK: String(Math.round(contextWindow / 1000)),
     pct: String(Math.round(pctNum)),
+    // {in}/{inK} show the current turn's non-cached input (matches
+    // `/status` "Tokens: Nk in"), not the full prompt side.
     in: String(u.input),
-    inK: toK(used),
+    inK: toK(u.input),
     out: String(u.output),
     outK: toK(u.output),
     total: String(u.total),
@@ -618,5 +627,5 @@ export default function register(api: OpenClawApi): void {
   );
 
   const hostMapCount = Object.keys(hostMap).length;
-  log(`v1.0.4 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
+  log(`v1.0.5 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }

@@ -124,7 +124,7 @@ console.log("extractHostContextWindows");
 // ---------------------------------------------------------------------------
 // buildVars + renderTemplate (Anthropic-style: cache is additional to input)
 // ---------------------------------------------------------------------------
-console.log("buildVars + renderTemplate (Anthropic)");
+console.log("buildVars + renderTemplate (/status-aligned)");
 {
   const entry = {
     usage: { input: 8000, output: 500, cacheRead: 40000, cacheWrite: 1000, total: 8500 },
@@ -133,19 +133,19 @@ console.log("buildVars + renderTemplate (Anthropic)");
     ts: Date.now(),
   };
   const vars = buildVars(entry, 200000);
-  // Anthropic: used = 8000 + 40000 + 1000 = 49000 → 49k, pct = 49/200 ≈ 25%
-  eq("usedK", vars.usedK, "49");
+  // /status aligns "Context" with cacheRead: used = 40000 → 40k, pct = 40/200 = 20%
+  eq("usedK", vars.usedK, "40");
   eq("maxK", vars.maxK, "200");
-  eq("pct", vars.pct, "25");
-  eq("inK", vars.inK, "49");
+  eq("pct", vars.pct, "20");
+  eq("inK is raw input", vars.inK, "8.0"); // 8000 → k=8 → "8.0" (toK keeps 1 decimal when <10k)
   eq("outK", vars.outK, "0"); // 500 → < 1k → "0"
-  // cachePct = 40000 / 49000 = 81.6% → 82
+  // cachePct still uses the Anthropic denom: 40000 / (8000+40000+1000) = 82
   eq("cachePct", vars.cachePct, "82");
   const tmpl = "📊 {model} | {usedK}k/{maxK}k ({pct}%) · {inK}→{outK}k tokens · cache {cachePct}%";
   eq(
     "render template",
     renderTemplate(tmpl, vars),
-    "📊 claude-opus-4-7 | 49k/200k (25%) · 49→0k tokens · cache 82%",
+    "📊 claude-opus-4-7 | 40k/200k (20%) · 8.0→0k tokens · cache 82%",
   );
 }
 
@@ -162,9 +162,10 @@ console.log("buildVars (openai-completions style, cacheRead ≤ input)");
     ts: Date.now(),
   };
   const vars = buildVars(entry, 1000000);
-  eq("OpenAI usedK (no double count)", vars.usedK, "53");
-  eq("OpenAI pct", vars.pct, "5");           // 53/1000 = 5.3 → 5
-  eq("OpenAI inK matches used", vars.inK, "53");
+  // /status-aligned: usedK = cacheRead = 40
+  eq("qwen usedK tracks cacheRead", vars.usedK, "40");
+  eq("qwen pct", vars.pct, "4"); // 40/1000 = 4
+  eq("qwen inK is raw input", vars.inK, "53");
   eq("OpenAI cachePct uses input as denom", vars.cachePct, "75"); // 40/53 ≈ 75
   truthy("cachePct never over 100 for this case", Number(vars.cachePct) <= 100);
 }
@@ -172,10 +173,11 @@ console.log("buildVars (openai-completions style, cacheRead ≤ input)");
 // ---------------------------------------------------------------------------
 // buildVars (openai-codex actually returns Anthropic-style usage)
 // ---------------------------------------------------------------------------
-console.log("buildVars (openai-codex → Anthropic-style)");
+console.log("buildVars (openai-codex → Anthropic-style, /status-aligned)");
 {
   // Real observation: gpt-5.4 usage shows input=42k, cacheRead=74k — 74>42
   // so it must be Anthropic-style (cache is additional, not subset).
+  // /status for the same turn: "74k cached · Context: 74k/200k (37%)".
   const entry = {
     usage: { input: 42000, output: 3100, cacheRead: 74000, cacheWrite: 0, total: 45100 },
     model: "gpt-5.4",
@@ -183,12 +185,13 @@ console.log("buildVars (openai-codex → Anthropic-style)");
     ts: Date.now(),
   };
   const vars = buildVars(entry, 200000);
-  // Full prompt = 42 + 74 = 116k → 58%
-  eq("codex usedK", vars.usedK, "116");
-  eq("codex pct", vars.pct, "58");
-  // cache hit = 74 / 116 ≈ 64% (matches /status)
-  eq("codex cachePct ≤ 100", vars.cachePct, "64");
-  truthy("codex cachePct not blown up", Number(vars.cachePct) <= 100);
+  // used = cacheRead = 74k → 37% (exact match with /status)
+  eq("codex usedK matches /status Context", vars.usedK, "74");
+  eq("codex pct matches /status 37%", vars.pct, "37");
+  eq("codex inK matches /status '42k in'", vars.inK, "42");
+  // cache hit = 74 / (42+74) = 64% (matches /status "64% hit")
+  eq("codex cachePct matches /status 64%", vars.cachePct, "64");
+  truthy("codex cachePct ≤ 100", Number(vars.cachePct) <= 100);
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +206,30 @@ console.log("buildVars (heuristic: cacheRead > input on unknown provider)");
     ts: Date.now(),
   };
   const vars = buildVars(entry, 200000);
-  eq("unknown + cacheRead>input → anthropic path", vars.usedK, "90"); // 10+80=90
-  eq("unknown + cacheRead>input → cachePct ≤ 100", vars.cachePct, "89"); // 80/90 ≈ 89
+  // /status-aligned: used = cacheRead = 80
+  eq("unknown provider + cacheRead>input → usedK = cacheRead", vars.usedK, "80");
+  eq("pct", vars.pct, "40"); // 80/200 = 40
+  // heuristic still correctly routes cache denom through Anthropic branch
+  eq("cachePct uses in+cache denom", vars.cachePct, "89"); // 80/(10+80) ≈ 89
+}
+
+// ---------------------------------------------------------------------------
+// buildVars (fresh session, cacheRead = 0 — used falls back to input)
+// ---------------------------------------------------------------------------
+console.log("buildVars (fresh session fallback)");
+{
+  const entry = {
+    usage: { input: 12000, output: 200, cacheRead: 0, cacheWrite: 0, total: 12200 },
+    model: "gpt-5.4",
+    provider: "openai-codex",
+    ts: Date.now(),
+  };
+  const vars = buildVars(entry, 200000);
+  // No cache yet → used falls back to input so the footer still reports
+  // meaningful context usage on the very first turn.
+  eq("fresh session usedK falls back to input", vars.usedK, "12");
+  eq("fresh session pct", vars.pct, "6"); // 12/200 = 6
+  eq("fresh session cachePct", vars.cachePct, "0");
 }
 
 // ---------------------------------------------------------------------------
@@ -229,14 +254,14 @@ console.log("buildVars (qwen default to OpenAI-style)");
 // ---------------------------------------------------------------------------
 console.log("buildFooter");
 {
-  // usage puts pct above 50
+  // /status-aligned: used = cacheRead. To trigger warn, cacheRead must
+  // exceed threshold × window. Here cacheRead=120k, window=200k → 60%.
   const entry = {
-    usage: { input: 60000, output: 1000, cacheRead: 40000, cacheWrite: 1000, total: 61000 },
+    usage: { input: 20000, output: 1000, cacheRead: 120000, cacheWrite: 0, total: 21000 },
     model: "claude-opus-4-7",
     provider: "anthropic",
     ts: Date.now(),
   };
-  // used = 60000+40000+1000 = 101000 / 200000 = 50.5% → 51 (warn triggered)
   const footer = buildFooter(entry, { contextWarnThreshold: 50 });
   truthy("warn present when pct > threshold", footer.includes("⚠️"));
   truthy("main line present", footer.includes("📊"));
@@ -251,15 +276,15 @@ console.log("buildFooter");
   const footer2 = buildFooter(entry2, { contextWarnThreshold: 50 });
   truthy("no warn below threshold", !footer2.includes("⚠️"));
 
-  // Custom format + zh-TW warn
+  // Custom format + zh-TW warn. 120k cacheRead / 200k → 60% triggers warn.
   const footer3 = buildFooter(entry, {
     contextWarnThreshold: 50,
     locale: "zh-TW",
     format: "📊 {model}/{pct}%",
     contextWarnFormat: "⚠️ 注意 context {pct}%",
   });
-  eq("custom main line", footer3.split("\n")[0], "📊 claude-opus-4-7/51%");
-  eq("custom warn line", footer3.split("\n")[1], "⚠️ 注意 context 51%");
+  eq("custom main line", footer3.split("\n")[0], "📊 claude-opus-4-7/60%");
+  eq("custom warn line", footer3.split("\n")[1], "⚠️ 注意 context 60%");
 }
 
 // ---------------------------------------------------------------------------

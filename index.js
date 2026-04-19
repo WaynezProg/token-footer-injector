@@ -150,10 +150,10 @@ function toK(n) {
 }
 function buildVars(entry, contextWindow) {
   const u = entry.usage;
-  const anthropicStyle = isAnthropicStyleUsage(entry.provider, u);
-  const used = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
-  const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
+  const used = u.cacheRead > 0 ? u.cacheRead : u.input;
   const pctNum = contextWindow > 0 ? used / contextWindow * 100 : 0;
+  const anthropicStyle = isAnthropicStyleUsage(entry.provider, u);
+  const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const cachePctNum = cacheDenom > 0 ? u.cacheRead / cacheDenom * 100 : 0;
   const vars = {
     model: entry.model || "unknown",
@@ -162,8 +162,10 @@ function buildVars(entry, contextWindow) {
     max: String(contextWindow),
     maxK: String(Math.round(contextWindow / 1e3)),
     pct: String(Math.round(pctNum)),
+    // {in}/{inK} show the current turn's non-cached input (matches
+    // `/status` "Tokens: Nk in"), not the full prompt side.
     in: String(u.input),
-    inK: toK(used),
+    inK: toK(u.input),
     out: String(u.output),
     outK: toK(u.output),
     total: String(u.total),
@@ -346,7 +348,7 @@ function register(api) {
     { priority: 100 }
   );
   const hostMapCount = Object.keys(hostMap).length;
-  log(`v1.0.4 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
+  log(`v1.0.5 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
