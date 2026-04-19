@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.4] — 2026-04-19
+
+### Fixed
+- **`cache` percent could blow past 100% (observed 816% / 924%) on
+  `openai-codex/gpt-5.4`.** Root cause: despite the name,
+  `openai-codex` returns usage in the **Anthropic convention**
+  (`input_tokens` excludes cache; `cache_read_input_tokens` is
+  *additional*). 1.0.2 had classified it as OpenAI-style from the
+  provider name and therefore computed `cachePct = cacheRead / input`,
+  which can legitimately exceed 1.0 when cacheRead > input.
+- New detection path `isAnthropicStyleUsage(provider, usage)` uses a
+  **numeric heuristic first**: if `cacheRead > input`, the payload
+  must be Anthropic-style because an OpenAI-style cached subset can
+  never exceed its parent. This means future providers that ship the
+  Anthropic shape with a name we did not anticipate are handled
+  correctly without a code change. The provider-name allowlist is
+  only consulted when the numeric check is inconclusive
+  (`cacheRead ≤ input`), and it now includes `openai-codex`, `kimi`,
+  and `minimax-portal` (all three use the anthropic-messages API
+  shape in this OpenClaw install).
+
+### Smoke tests
+- 3 new `buildVars` cases: (a) real openai-completions provider with
+  `cacheRead ≤ input` stays OpenAI-style, (b) `openai-codex` with
+  `cacheRead=74k > input=42k` now resolves to `usedK=116, cachePct=64`
+  matching the live `/status`, (c) an unknown-provider + cacheRead >
+  input case confirms the heuristic overrides the allowlist. 63/63
+  pass on 1.0.4.
+
 ## [1.0.3] — 2026-04-19
 
 ### Fixed

@@ -150,30 +150,61 @@ console.log("buildVars + renderTemplate (Anthropic)");
 }
 
 // ---------------------------------------------------------------------------
-// buildVars (OpenAI-style: cache is subset of input; do NOT double-count)
+// buildVars (true OpenAI-style: e.g. qwen/zai/xai on an openai-completions API)
 // ---------------------------------------------------------------------------
-console.log("buildVars (OpenAI-style)");
+console.log("buildVars (openai-completions style, cacheRead ≤ input)");
 {
-  // Scenario: gpt-5.4, prompt_tokens=53000 (full prompt, already includes cache),
-  // cache_read_input_tokens=40000 (subset of prompt_tokens).
-  // Previous (buggy) formula: used = 53000 + 40000 + 0 = 93000 → 47% of 200k.
-  // Correct: used = 53000 (cache is subset) → 27% of 200k.
+  // Heuristic kicks in: cacheRead ≤ input → OpenAI-style → cache is subset
   const entry = {
     usage: { input: 53000, output: 500, cacheRead: 40000, cacheWrite: 0, total: 53500 },
+    model: "qwen3.6-plus",
+    provider: "qwen",
+    ts: Date.now(),
+  };
+  const vars = buildVars(entry, 1000000);
+  eq("OpenAI usedK (no double count)", vars.usedK, "53");
+  eq("OpenAI pct", vars.pct, "5");           // 53/1000 = 5.3 → 5
+  eq("OpenAI inK matches used", vars.inK, "53");
+  eq("OpenAI cachePct uses input as denom", vars.cachePct, "75"); // 40/53 ≈ 75
+  truthy("cachePct never over 100 for this case", Number(vars.cachePct) <= 100);
+}
+
+// ---------------------------------------------------------------------------
+// buildVars (openai-codex actually returns Anthropic-style usage)
+// ---------------------------------------------------------------------------
+console.log("buildVars (openai-codex → Anthropic-style)");
+{
+  // Real observation: gpt-5.4 usage shows input=42k, cacheRead=74k — 74>42
+  // so it must be Anthropic-style (cache is additional, not subset).
+  const entry = {
+    usage: { input: 42000, output: 3100, cacheRead: 74000, cacheWrite: 0, total: 45100 },
     model: "gpt-5.4",
     provider: "openai-codex",
     ts: Date.now(),
   };
   const vars = buildVars(entry, 200000);
-  eq("OpenAI usedK (no double count)", vars.usedK, "53");
-  eq("OpenAI pct", vars.pct, "27");          // 53/200 → 26.5 → 27
-  eq("OpenAI inK matches used", vars.inK, "53");
-  // cachePct = cacheRead / input = 40/53 → 75.4 → 75
-  eq("OpenAI cachePct uses input as denom", vars.cachePct, "75");
+  // Full prompt = 42 + 74 = 116k → 58%
+  eq("codex usedK", vars.usedK, "116");
+  eq("codex pct", vars.pct, "58");
+  // cache hit = 74 / 116 ≈ 64% (matches /status)
+  eq("codex cachePct ≤ 100", vars.cachePct, "64");
+  truthy("codex cachePct not blown up", Number(vars.cachePct) <= 100);
+}
 
-  // Guard against the old bug: ensure we never show pct > 100 when not
-  // actually over the window.
-  truthy("OpenAI pct never over 100 for a half-full context", Number(vars.pct) < 100);
+// ---------------------------------------------------------------------------
+// Heuristic: cacheRead > input forces Anthropic-style regardless of provider
+// ---------------------------------------------------------------------------
+console.log("buildVars (heuristic: cacheRead > input on unknown provider)");
+{
+  const entry = {
+    usage: { input: 10000, output: 500, cacheRead: 80000, cacheWrite: 0, total: 10500 },
+    model: "weird-future-model",
+    provider: "some-new-provider",
+    ts: Date.now(),
+  };
+  const vars = buildVars(entry, 200000);
+  eq("unknown + cacheRead>input → anthropic path", vars.usedK, "90"); // 10+80=90
+  eq("unknown + cacheRead>input → cachePct ≤ 100", vars.cachePct, "89"); // 80/90 ≈ 89
 }
 
 // ---------------------------------------------------------------------------

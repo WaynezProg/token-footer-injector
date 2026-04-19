@@ -25,6 +25,7 @@ __export(index_exports, {
   buildVars: () => buildVars,
   default: () => register,
   extractHostContextWindows: () => extractHostContextWindows,
+  isAnthropicStyleUsage: () => isAnthropicStyleUsage,
   normalizeUsage: () => normalizeUsage,
   renderTemplate: () => renderTemplate,
   resolveContextWindow: () => resolveContextWindow
@@ -67,10 +68,11 @@ var DEFAULT_MODEL_CONTEXT_WINDOWS = {
   "deepseek-": 128e3,
   "minimax-": 245760
 };
-function isAnthropicStyleProvider(provider) {
+function isAnthropicStyleUsage(provider, usage) {
+  if (usage.cacheRead > usage.input) return true;
   if (!provider) return false;
   const p = provider.toLowerCase();
-  return p === "anthropic" || p === "claude-cli" || p === "claude-code" || p.startsWith("claude");
+  return p === "anthropic" || p === "claude-cli" || p === "claude-code" || p.startsWith("claude") || p === "openai-codex" || p === "kimi" || p === "minimax-portal";
 }
 var DEFAULT_FORMATS = {
   en: {
@@ -148,7 +150,7 @@ function toK(n) {
 }
 function buildVars(entry, contextWindow) {
   const u = entry.usage;
-  const anthropicStyle = isAnthropicStyleProvider(entry.provider);
+  const anthropicStyle = isAnthropicStyleUsage(entry.provider, u);
   const used = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const pctNum = contextWindow > 0 ? used / contextWindow * 100 : 0;
@@ -344,7 +346,7 @@ function register(api) {
     { priority: 100 }
   );
   const hostMapCount = Object.keys(hostMap).length;
-  log(`v1.0.3 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
+  log(`v1.0.4 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
@@ -353,6 +355,7 @@ function register(api) {
   buildFooter,
   buildVars,
   extractHostContextWindows,
+  isAnthropicStyleUsage,
   normalizeUsage,
   renderTemplate,
   resolveContextWindow

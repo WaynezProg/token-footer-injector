@@ -170,22 +170,48 @@ const DEFAULT_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 };
 
 /**
- * Providers that report `input_tokens` as the full prompt size (cached
- * portion already included) and `cache_read_input_tokens` as a subset of
- * that total — vs. Anthropic's convention where `input_tokens` excludes
- * the cached portion and `cache_read_input_tokens` is additional.
+ * Detect which cache-accounting convention the provider's usage payload
+ * follows.
  *
- * We default to "OpenAI-style" because that is what most providers
- * normalize to, and only switch to summing for Anthropic-style providers.
+ * Two conventions in the wild:
+ *
+ * - **Anthropic-style**: `input_tokens` excludes cache;
+ *   `cache_read_input_tokens` and `cache_creation_input_tokens` are
+ *   *additional* to it. Full prompt = input + cacheRead + cacheWrite.
+ *   Seen in: Anthropic, claude-cli, kimi (anthropic-messages api),
+ *   openai-codex (despite the name), minimax-portal.
+ *
+ * - **OpenAI-style**: `prompt_tokens` is the full prompt size with
+ *   `prompt_tokens_details.cached_tokens` being a *subset* already
+ *   included in it. Full prompt = input. Seen in: openai, qwen
+ *   (openai-completions), zai (openai-completions), xai
+ *   (openai-responses), google (gemini).
+ *
+ * Naming is not a reliable signal (e.g. `openai-codex` uses the
+ * Anthropic convention). We therefore use a numeric heuristic first:
+ * if `cacheRead > input`, the provider must be Anthropic-style because
+ * an OpenAI-style cache is always a subset of input and therefore
+ * cannot exceed it. Falls back to the name list only when the numeric
+ * check is inconclusive (cacheRead ≤ input).
  */
-function isAnthropicStyleProvider(provider: string): boolean {
+export function isAnthropicStyleUsage(
+  provider: string | undefined,
+  usage: NormalizedUsage,
+): boolean {
+  if (usage.cacheRead > usage.input) return true;
+  // Numeric check inconclusive (cacheRead could be a subset of input or
+  // be zero). Use provider hint for correctness, but note that when
+  // cacheRead == 0 both conventions yield the same result anyway.
   if (!provider) return false;
   const p = provider.toLowerCase();
   return (
     p === "anthropic" ||
     p === "claude-cli" ||
     p === "claude-code" ||
-    p.startsWith("claude")
+    p.startsWith("claude") ||
+    p === "openai-codex" ||
+    p === "kimi" ||
+    p === "minimax-portal"
   );
 }
 
@@ -340,7 +366,7 @@ export function buildVars(entry: StashEntry, contextWindow: number): FooterVars 
   // OpenAI/Codex/Qwen/etc.: `input` already includes the cached portion; cacheRead is a subset
   //   → prompt size = input (cacheRead + cacheWrite would double-count)
   //   → cache hit %  = cacheRead / input
-  const anthropicStyle = isAnthropicStyleProvider(entry.provider);
+  const anthropicStyle = isAnthropicStyleUsage(entry.provider, u);
   const used = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
   const pctNum = contextWindow > 0 ? (used / contextWindow) * 100 : 0;
@@ -592,5 +618,5 @@ export default function register(api: OpenClawApi): void {
   );
 
   const hostMapCount = Object.keys(hostMap).length;
-  log(`v1.0.3 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
+  log(`v1.0.4 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }
