@@ -4,6 +4,31 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.3] — 2026-04-19
+
+### Fixed
+- **Context window now sourced from the OpenClaw host config, not a
+  hardcoded table.** The previous behavior — a curated
+  `DEFAULT_MODEL_CONTEXT_WINDOWS` plus an optional `modelContextWindows`
+  override — silently went stale whenever users ran newer/larger models.
+  Example that triggered this release: `qwen3.6-plus` on the user's
+  account is a 1 M-token window; the plugin was printing `/131k` because
+  the hardcoded entry was the public-docs number.
+- New `extractHostContextWindows(config)` helper parses
+  `config.models.providers.*.models[]` and builds a `{modelId,
+  providerId/modelId}` map of real `contextWindow` values — the same
+  source OpenClaw core uses for `/status`, compaction, and budgeting. So
+  the footer can never disagree with `/status` again.
+- Resolution priority (first match wins): plugin-config override → host
+  config → hardcoded defaults → `defaultContextWindow`. Each tier
+  supports exact match, then longest-prefix fallback.
+
+### Smoke tests
+- Added 2 tier-priority tests and 6 `extractHostContextWindows`
+  assertions covering bare-id / provider-qualified indexing, multiple
+  models per provider, malformed entries, and null-safe input. 57/57
+  pass on 1.0.3.
+
 ## [1.0.2] — 2026-04-19
 
 ### Fixed

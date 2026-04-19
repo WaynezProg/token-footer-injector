@@ -24,6 +24,7 @@ __export(index_exports, {
   buildFooter: () => buildFooter,
   buildVars: () => buildVars,
   default: () => register,
+  extractHostContextWindows: () => extractHostContextWindows,
   normalizeUsage: () => normalizeUsage,
   renderTemplate: () => renderTemplate,
   resolveContextWindow: () => resolveContextWindow
@@ -100,18 +101,45 @@ function normalizeUsage(raw) {
   if (input === 0 && output === 0 && total === 0) return null;
   return { input, output, cacheRead, cacheWrite, total };
 }
-function resolveContextWindow(model, overrides, fallback) {
-  const map = { ...DEFAULT_MODEL_CONTEXT_WINDOWS, ...overrides ?? {} };
-  if (map[model]) return map[model];
-  let best = fallback;
-  let bestLen = 0;
-  for (const key of Object.keys(map)) {
-    if (model.startsWith(key) && key.length > bestLen) {
-      best = map[key];
-      bestLen = key.length;
+function extractHostContextWindows(hostConfig) {
+  const out = {};
+  if (!hostConfig || typeof hostConfig !== "object") return out;
+  const providers = hostConfig?.models?.providers;
+  if (!providers || typeof providers !== "object") return out;
+  for (const [provId, prov] of Object.entries(providers)) {
+    const models = prov?.models;
+    if (!Array.isArray(models)) continue;
+    for (const m of models) {
+      if (!m || typeof m !== "object") continue;
+      const mm = m;
+      if (typeof mm.id !== "string") continue;
+      if (typeof mm.contextWindow !== "number" || !Number.isFinite(mm.contextWindow)) continue;
+      out[mm.id] = mm.contextWindow;
+      out[`${provId}/${mm.id}`] = mm.contextWindow;
     }
   }
-  return best;
+  return out;
+}
+function resolveContextWindow(model, overrides, fallback, hostMap) {
+  const tiers = [
+    overrides,
+    hostMap,
+    DEFAULT_MODEL_CONTEXT_WINDOWS
+  ];
+  for (const tier of tiers) {
+    if (!tier) continue;
+    if (tier[model]) return tier[model];
+    let best = 0;
+    let bestLen = 0;
+    for (const key of Object.keys(tier)) {
+      if (model.startsWith(key) && key.length > bestLen) {
+        best = tier[key];
+        bestLen = key.length;
+      }
+    }
+    if (best > 0) return best;
+  }
+  return fallback;
 }
 function toK(n) {
   if (n < 1e3) return "0";
@@ -153,8 +181,13 @@ function renderTemplate(tmpl, vars) {
     return match;
   });
 }
-function buildFooter(entry, config) {
-  const win = resolveContextWindow(entry.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW);
+function buildFooter(entry, config, hostMap) {
+  const win = resolveContextWindow(
+    entry.model,
+    config.modelContextWindows,
+    config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    hostMap
+  );
   const vars = buildVars(entry, win);
   const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
   const defaults = DEFAULT_FORMATS[locale];
@@ -233,6 +266,7 @@ function register(api) {
   const cap = typeof config.maxMessageLength === "number" && config.maxMessageLength > 0 ? config.maxMessageLength : void 0;
   const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
   const debug = config.debug === true;
+  const hostMap = extractHostContextWindows(anyApi.config);
   const stash = new UsageStash(ttlMs);
   if (typeof api.on !== "function") {
     warn("api.on not available on this host \u2014 plugin disabled");
@@ -264,7 +298,7 @@ function register(api) {
       if (cx?.channelId) keys.push(`channel:${cx.channelId}`);
       stash.set(keys, entry);
       if (debug) log(`llm_output STASH keys=[${keys.join(",")}] size=${stash.size()}`);
-      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
+      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold }, hostMap);
       if (!footer) return;
       const firstLine = footer.split("\n", 1)[0];
       const texts = ev.assistantTexts;
@@ -296,7 +330,7 @@ function register(api) {
         if (debug) log(`message_sending MISS: no stash entry for keys=[${keys.join(",")}], stashSize=${stash.size()}`);
         return;
       }
-      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
+      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold }, hostMap);
       const originalContent = typeof ev.content === "string" ? ev.content : "";
       const firstLine = footer.split("\n", 1)[0];
       if (originalContent.includes(firstLine)) {
@@ -309,7 +343,8 @@ function register(api) {
     },
     { priority: 100 }
   );
-  log(`v1.0.2 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
+  const hostMapCount = Object.keys(hostMap).length;
+  log(`v1.0.3 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
@@ -317,6 +352,7 @@ function register(api) {
   applyFooter,
   buildFooter,
   buildVars,
+  extractHostContextWindows,
   normalizeUsage,
   renderTemplate,
   resolveContextWindow

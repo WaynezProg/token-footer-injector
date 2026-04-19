@@ -11,6 +11,7 @@ const {
   default: register,
   normalizeUsage,
   resolveContextWindow,
+  extractHostContextWindows,
   buildVars,
   renderTemplate,
   buildFooter,
@@ -71,10 +72,54 @@ console.log("resolveContextWindow");
 eq("exact opus 4.7", resolveContextWindow("claude-opus-4-7", undefined, 128000), 200000);
 eq("exact opus 4.7 1m", resolveContextWindow("claude-opus-4-7[1m]", undefined, 128000), 1000000);
 eq("prefix claude-", resolveContextWindow("claude-something-new", undefined, 128000), 200000);
-eq("prefix qwen3-", resolveContextWindow("qwen3-turbo", undefined, 128000), 131072);
-eq("exact qwen3.6-plus", resolveContextWindow("qwen3.6-plus", undefined, 128000), 131072);
+eq("prefix qwen3- (hardcoded)", resolveContextWindow("qwen3-turbo", undefined, 128000), 131072);
+eq("exact qwen3.6-plus (hardcoded)", resolveContextWindow("qwen3.6-plus", undefined, 128000), 131072);
 eq("override wins", resolveContextWindow("custom-model", { "custom-model": 64000 }, 128000), 64000);
 eq("fallback", resolveContextWindow("totally-unknown-xxx", undefined, 99999), 99999);
+
+// host map takes priority over hardcoded defaults
+eq(
+  "host map beats hardcoded qwen3.6-plus",
+  resolveContextWindow("qwen3.6-plus", undefined, 128000, { "qwen3.6-plus": 1000000 }),
+  1000000,
+);
+eq(
+  "plugin override still wins over host map",
+  resolveContextWindow("qwen3.6-plus", { "qwen3.6-plus": 500000 }, 128000, { "qwen3.6-plus": 1000000 }),
+  500000,
+);
+
+// ---------------------------------------------------------------------------
+// extractHostContextWindows — parses openclaw.json shape
+// ---------------------------------------------------------------------------
+console.log("extractHostContextWindows");
+{
+  const hostConfig = {
+    models: {
+      providers: {
+        qwen: {
+          models: [
+            { id: "qwen3.6-plus", contextWindow: 1000000, maxTokens: 65536 },
+            { id: "qwen3-max", contextWindow: 262144 },
+          ],
+        },
+        kimi: {
+          models: [{ id: "k2p5", contextWindow: 262144 }],
+        },
+        noModelsField: { models: undefined },
+        malformed: { models: [{ id: "bad" /* no contextWindow */ }, { contextWindow: 100 /* no id */ }] },
+      },
+    },
+  };
+  const map = extractHostContextWindows(hostConfig);
+  eq("indexes bare id", map["qwen3.6-plus"], 1000000);
+  eq("indexes providerId/id", map["qwen/qwen3.6-plus"], 1000000);
+  eq("multiple models per provider", map["qwen3-max"], 262144);
+  eq("separate providers", map["kimi/k2p5"], 262144);
+  eq("missing contextWindow is skipped", map["bad"], undefined);
+  eq("null safety", JSON.stringify(extractHostContextWindows(null)), "{}");
+  eq("missing providers", JSON.stringify(extractHostContextWindows({ models: {} })), "{}");
+}
 
 // ---------------------------------------------------------------------------
 // buildVars + renderTemplate (Anthropic-style: cache is additional to input)

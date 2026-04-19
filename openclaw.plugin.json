@@ -1,7 +1,7 @@
 {
   "id": "token-footer-injector",
   "name": "Token Footer Injector",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Automatically appends a token-usage footer to outbound agent messages. The model does not write the footer; the plugin reads the real `usage` object from the llm_output hook and appends a deterministic line during message_sending. 100% hit-rate, 0 model tokens.",
   "entry": "./index.js",
   "configSchema": {

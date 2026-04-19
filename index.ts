@@ -239,23 +239,64 @@ export function normalizeUsage(raw: RawUsage | undefined | null): NormalizedUsag
   return { input, output, cacheRead, cacheWrite, total };
 }
 
+/**
+ * Extract `{modelId: contextWindow}` from the OpenClaw host config
+ * (`config.models.providers.*.models[]`). This is the authoritative source
+ * — OpenClaw itself uses these values for `/status`, compaction thresholds,
+ * and per-turn accounting. Keeping our footer in sync with them prevents
+ * the two surfaces from disagreeing (which is what produced the
+ * 464k/400k "116%" footer while `/status` read 53k/200k on gpt-5.4).
+ *
+ * Each model is indexed twice: by bare `id` (`qwen3.6-plus`) and by
+ * `providerId/id` (`qwen/qwen3.6-plus`), so callers can match either shape.
+ */
+export function extractHostContextWindows(hostConfig: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!hostConfig || typeof hostConfig !== "object") return out;
+  const providers = (hostConfig as { models?: { providers?: Record<string, unknown> } })?.models?.providers;
+  if (!providers || typeof providers !== "object") return out;
+  for (const [provId, prov] of Object.entries(providers)) {
+    const models = (prov as { models?: unknown })?.models;
+    if (!Array.isArray(models)) continue;
+    for (const m of models) {
+      if (!m || typeof m !== "object") continue;
+      const mm = m as { id?: unknown; contextWindow?: unknown };
+      if (typeof mm.id !== "string") continue;
+      if (typeof mm.contextWindow !== "number" || !Number.isFinite(mm.contextWindow)) continue;
+      out[mm.id] = mm.contextWindow;
+      out[`${provId}/${mm.id}`] = mm.contextWindow;
+    }
+  }
+  return out;
+}
+
 export function resolveContextWindow(
   model: string,
   overrides: Record<string, number> | undefined,
   fallback: number,
+  hostMap?: Record<string, number>,
 ): number {
-  const map: Record<string, number> = { ...DEFAULT_MODEL_CONTEXT_WINDOWS, ...(overrides ?? {}) };
-  if (map[model]) return map[model];
-  // Longest-prefix match
-  let best = fallback;
-  let bestLen = 0;
-  for (const key of Object.keys(map)) {
-    if (model.startsWith(key) && key.length > bestLen) {
-      best = map[key];
-      bestLen = key.length;
+  // Priority: plugin config overrides > host config (openclaw.json) > hardcoded defaults > fallback
+  // Each tier supports exact match first, then longest-prefix match.
+  const tiers: Array<Record<string, number> | undefined> = [
+    overrides,
+    hostMap,
+    DEFAULT_MODEL_CONTEXT_WINDOWS,
+  ];
+  for (const tier of tiers) {
+    if (!tier) continue;
+    if (tier[model]) return tier[model];
+    let best = 0;
+    let bestLen = 0;
+    for (const key of Object.keys(tier)) {
+      if (model.startsWith(key) && key.length > bestLen) {
+        best = tier[key];
+        bestLen = key.length;
+      }
     }
+    if (best > 0) return best;
   }
-  return best;
+  return fallback;
 }
 
 function round(n: number, digits = 0): number {
@@ -337,8 +378,14 @@ export function renderTemplate(tmpl: string, vars: Record<string, string>): stri
 export function buildFooter(
   entry: StashEntry,
   config: Required<Pick<PluginConfig, "contextWarnThreshold">> & PluginConfig,
+  hostMap?: Record<string, number>,
 ): string {
-  const win = resolveContextWindow(entry.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW);
+  const win = resolveContextWindow(
+    entry.model,
+    config.modelContextWindows,
+    config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    hostMap,
+  );
   const vars = buildVars(entry, win);
   const locale: "en" | "zh-TW" = config.locale === "zh-TW" ? "zh-TW" : "en";
   const defaults = DEFAULT_FORMATS[locale];
@@ -440,6 +487,12 @@ export default function register(api: OpenClawApi): void {
   const locale: "en" | "zh-TW" = config.locale === "zh-TW" ? "zh-TW" : "en";
   const debug = config.debug === true;
 
+  // Pull the authoritative context-window table from the OpenClaw host
+  // config (`config.models.providers.*.models[].contextWindow`). These are
+  // the exact same values the core uses for /status, compaction, and
+  // budgeting, so we stay in sync automatically.
+  const hostMap = extractHostContextWindows(anyApi.config);
+
   const stash = new UsageStash(ttlMs);
 
   if (typeof api.on !== "function") {
@@ -484,7 +537,7 @@ export default function register(api: OpenClawApi): void {
       // inside `hooks.map(async ...)`, so mutating `event.assistantTexts`
       // (same reference as the core's outer variable) before the handler
       // yields is enough to have the footer propagated downstream.
-      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
+      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold }, hostMap);
       if (!footer) return;
       const firstLine = footer.split("\n", 1)[0];
       const texts = ev.assistantTexts;
@@ -522,7 +575,7 @@ export default function register(api: OpenClawApi): void {
         return;
       }
 
-      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
+      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold }, hostMap);
       const originalContent = typeof ev.content === "string" ? ev.content : "";
       // Guard against double-injection: if llm_output already mutated the
       // upstream assistantTexts, the content will already carry the footer.
@@ -538,5 +591,6 @@ export default function register(api: OpenClawApi): void {
     { priority: 100 },
   );
 
-  log(`v1.0.2 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}`);
+  const hostMapCount = Object.keys(hostMap).length;
+  log(`v1.0.3 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
 }
