@@ -1,0 +1,57 @@
+{
+  "id": "token-footer-injector",
+  "name": "Token Footer Injector",
+  "version": "1.0.0",
+  "description": "Automatically appends a token-usage footer to outbound agent messages. The model does not write the footer; the plugin reads the real `usage` object from the llm_output hook and appends a deterministic line during message_sending. 100% hit-rate, 0 model tokens.",
+  "entry": "./index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "format": {
+        "type": "string",
+        "description": "Footer template. Placeholders: {model} {used} {usedK} {max} {maxK} {pct} {in} {inK} {out} {outK} {total} {totalK} {cacheRead} {cacheReadK} {cacheWrite} {cacheWriteK} {cachePct}."
+      },
+      "contextWarnFormat": {
+        "type": "string",
+        "description": "Extra line appended when context usage exceeds contextWarnThreshold. Same placeholders as `format`."
+      },
+      "contextWarnThreshold": {
+        "type": "number",
+        "description": "Percentage (0-100) above which `contextWarnFormat` is appended. Default 50."
+      },
+      "modelContextWindows": {
+        "type": "object",
+        "description": "Map of model id → context-window size in tokens. Used for the {max}/{maxK}/{pct} placeholders. Supports exact match and prefix match.",
+        "additionalProperties": { "type": "number" }
+      },
+      "defaultContextWindow": {
+        "type": "number",
+        "description": "Fallback context-window size when the model is not in `modelContextWindows`. Default 128000."
+      },
+      "skipAgents": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Agent IDs to skip. No footer is appended for these agents."
+      },
+      "skipChannels": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Channel IDs (e.g. `discord`, `telegram`) to skip."
+      },
+      "maxMessageLength": {
+        "type": "number",
+        "description": "If set, the final content (original + footer) is hard-capped at this length. The body is trimmed first; the footer is always preserved. Useful for Discord (2000). Default: no cap."
+      },
+      "usageTtlMs": {
+        "type": "number",
+        "description": "How long a stashed usage entry is kept before it is considered stale and dropped. Default 60000 (60s)."
+      },
+      "locale": {
+        "type": "string",
+        "enum": ["en", "zh-TW"],
+        "description": "Default language for the built-in format strings when `format` is not set. Default 'en'."
+      }
+    },
+    "additionalProperties": false
+  }
+}

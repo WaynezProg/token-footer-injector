@@ -1,0 +1,62 @@
+// Example openclaw.json snippet for registering token-footer-injector.
+// Paths and keys follow the OpenClaw plugin manifest convention.
+{
+  "plugins": {
+    "allow": [
+      // ... your other plugins ...
+      "token-footer-injector"
+    ],
+    "entries": {
+      "token-footer-injector": {
+        "enabled": true,
+        "config": {
+          // Language for built-in format strings. Only affects the warning
+          // line today; the main line is identical across locales.
+          "locale": "zh-TW",
+
+          // Percent of context window above which the warning line kicks in.
+          "contextWarnThreshold": 50,
+
+          // Agent IDs that should NOT receive a footer. Useful for
+          // read-only bots, tool-only agents, or anything that renders to
+          // a user-facing UI that already shows token stats elsewhere.
+          "skipAgents": [],
+
+          // Channel IDs to skip entirely. Common values: "discord",
+          // "telegram", "slack", "web".
+          "skipChannels": [],
+
+          // Hard cap on final message length. Body is trimmed with an
+          // ellipsis if needed; the footer is always preserved. Discord's
+          // limit is 2000, so 1900 leaves headroom for client rendering.
+          "maxMessageLength": 1900,
+
+          // Override the footer layout. All placeholders documented in
+          // README.md are supported. Omit to use the built-in template.
+          // "format": "📊 {model} | {usedK}k/{maxK}k ({pct}%) · {inK}→{outK}k · cache {cachePct}%",
+          // "contextWarnFormat": "⚠️ context {pct}%,建議 /compact",
+
+          // Extend / override the model → context-window table.
+          // Keys match exactly first, then by longest prefix.
+          "modelContextWindows": {
+            "my-local-llama": 32000,
+            "qwen3.6-plus": 131072
+          },
+
+          // Fallback context window for models not in the table.
+          "defaultContextWindow": 128000,
+
+          // How long a stashed usage entry is considered fresh. 60s is
+          // plenty for interactive flows; raise only if your delivery
+          // pipeline is unusually slow.
+          "usageTtlMs": 60000
+        }
+      }
+    },
+    "load": {
+      "paths": [
+        "/Users/YOU/.openclaw/extensions/token-footer-injector"
+      ]
+    }
+  }
+}

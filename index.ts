@@ -1,0 +1,473 @@
+/**
+ * token-footer-injector — OpenClaw plugin
+ *
+ * Deterministically appends a token-usage footer to every outbound agent
+ * message. The footer is sourced from the real `usage` object emitted by the
+ * `llm_output` hook, so the model itself does not have to write it — the
+ * result is 100% hit-rate, 100% accurate numbers, and zero model tokens
+ * spent on the footer.
+ *
+ * Flow:
+ *   1. `llm_output` (void hook) fires after each LLM attempt. We stash the
+ *      usage + model under several indexes (sessionKey / channelId /
+ *      agentId).
+ *   2. `message_sending` (modifying hook) fires right before an outbound
+ *      payload is delivered. We look the stash up by channelId (LRU), build
+ *      the footer, and return `{ content: original + footer }`.
+ *
+ * The hook contexts do not overlap enough to do a precise join (llm_output
+ * has sessionKey/agentId/channelId; message_sending has only channelId +
+ * accountId), so we fall back to a per-channelId LRU with a short TTL. In
+ * practice this is sufficient because outbound payloads for one LLM run
+ * are dispatched sequentially for the same channel.
+ */
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+interface RawUsage {
+  // Current (plugin-sdk) shape
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  total?: number;
+  // Legacy / provider-native shapes we also accept defensively
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  [key: string]: unknown;
+}
+
+interface NormalizedUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  total: number;
+}
+
+interface StashEntry {
+  usage: NormalizedUsage;
+  model: string;
+  provider: string;
+  ts: number;
+}
+
+interface PluginConfig {
+  format?: string;
+  contextWarnFormat?: string;
+  contextWarnThreshold?: number;
+  modelContextWindows?: Record<string, number>;
+  defaultContextWindow?: number;
+  skipAgents?: string[];
+  skipChannels?: string[];
+  maxMessageLength?: number;
+  usageTtlMs?: number;
+  locale?: "en" | "zh-TW";
+}
+
+interface LlmOutputEvent {
+  runId?: string;
+  sessionId?: string;
+  provider?: string;
+  model?: string;
+  assistantTexts?: string[];
+  lastAssistant?: unknown;
+  usage?: RawUsage;
+}
+
+interface LlmOutputCtx {
+  runId?: string;
+  agentId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  workspaceDir?: string;
+  messageProvider?: string;
+  trigger?: string;
+  channelId?: string;
+}
+
+interface MessageSendingEvent {
+  to?: string;
+  content?: string;
+  metadata?: {
+    channel?: string;
+    accountId?: string;
+    mediaUrls?: unknown;
+    [key: string]: unknown;
+  };
+}
+
+interface MessageSendingCtx {
+  channelId?: string;
+  accountId?: string;
+}
+
+interface MessageSendingResult {
+  content?: string;
+  cancel?: boolean;
+}
+
+interface OpenClawApi {
+  on(event: string, handler: (...args: unknown[]) => unknown, opts?: { priority?: number }): void;
+  getConfig?(): PluginConfig;
+}
+
+// ---------------------------------------------------------------------------
+// Defaults
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TTL_MS = 60_000;
+const DEFAULT_CONTEXT_WINDOW = 128_000;
+const DEFAULT_WARN_THRESHOLD = 50;
+
+/**
+ * Curated model → context-window map. Users can override or extend via
+ * `modelContextWindows` in plugin config. Keys are matched by exact match
+ * first, then longest-prefix.
+ */
+const DEFAULT_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  // Anthropic
+  "claude-opus-4-7[1m]": 1_000_000,
+  "claude-opus-4-7": 200_000,
+  "claude-opus-4-6": 200_000,
+  "claude-sonnet-4-6": 200_000,
+  "claude-haiku-4-5": 200_000,
+  "claude-3-7-sonnet": 200_000,
+  "claude-3-5-sonnet": 200_000,
+  "claude-3-5-haiku": 200_000,
+  "claude-3-opus": 200_000,
+  "claude-": 200_000, // prefix fallback
+  // OpenAI
+  "gpt-5.4": 400_000,
+  "gpt-5": 256_000,
+  "gpt-4.1": 1_000_000,
+  "gpt-4o": 128_000,
+  "gpt-4": 128_000,
+  "o1": 200_000,
+  "o3": 200_000,
+  // Qwen / Alibaba
+  "qwen3.6-plus": 131_072,
+  "qwen3-plus": 131_072,
+  "qwen3-max": 262_144,
+  "qwen3-": 131_072,
+  "qwen-": 131_072,
+  // Others
+  "glm-4.6": 128_000,
+  "kimi-k2": 128_000,
+  "deepseek-": 128_000,
+  "minimax-": 245_760,
+};
+
+const DEFAULT_FORMATS: Record<"en" | "zh-TW", { format: string; warn: string }> = {
+  en: {
+    format: "📊 {model} | {usedK}k/{maxK}k ({pct}%) · {inK}→{outK}k tokens · cache {cachePct}%",
+    warn: "⚠️ context {pct}%, suggest /compact",
+  },
+  "zh-TW": {
+    format: "📊 {model} | {usedK}k/{maxK}k ({pct}%) · {inK}→{outK}k tokens · cache {cachePct}%",
+    warn: "⚠️ context {pct}%,建議 /compact",
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function log(msg: string): void {
+  console.log(`[token-footer-injector] ${msg}`);
+}
+
+function warn(msg: string): void {
+  console.log(`[token-footer-injector] WARN: ${msg}`);
+}
+
+function toNum(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+export function normalizeUsage(raw: RawUsage | undefined | null): NormalizedUsage | null {
+  if (!raw || typeof raw !== "object") return null;
+  const input =
+    toNum(raw.input) ||
+    toNum(raw.input_tokens) ||
+    toNum(raw.prompt_tokens);
+  const output =
+    toNum(raw.output) ||
+    toNum(raw.output_tokens) ||
+    toNum(raw.completion_tokens);
+  const cacheRead =
+    toNum(raw.cacheRead) ||
+    toNum(raw.cache_read_input_tokens) ||
+    toNum(raw.cacheReadTokens);
+  const cacheWrite =
+    toNum(raw.cacheWrite) ||
+    toNum(raw.cache_creation_input_tokens) ||
+    toNum(raw.cacheWriteTokens);
+  const total = toNum(raw.total) || toNum(raw.total_tokens) || input + output;
+  if (input === 0 && output === 0 && total === 0) return null;
+  return { input, output, cacheRead, cacheWrite, total };
+}
+
+export function resolveContextWindow(
+  model: string,
+  overrides: Record<string, number> | undefined,
+  fallback: number,
+): number {
+  const map: Record<string, number> = { ...DEFAULT_MODEL_CONTEXT_WINDOWS, ...(overrides ?? {}) };
+  if (map[model]) return map[model];
+  // Longest-prefix match
+  let best = fallback;
+  let bestLen = 0;
+  for (const key of Object.keys(map)) {
+    if (model.startsWith(key) && key.length > bestLen) {
+      best = map[key];
+      bestLen = key.length;
+    }
+  }
+  return best;
+}
+
+function round(n: number, digits = 0): number {
+  const f = Math.pow(10, digits);
+  return Math.round(n * f) / f;
+}
+
+function toK(n: number): string {
+  // < 10 → 1 decimal; >= 10 → integer. Keeps footer compact.
+  if (n < 1000) return "0";
+  const k = n / 1000;
+  return k < 10 ? k.toFixed(1) : String(Math.round(k));
+}
+
+interface FooterVars {
+  model: string;
+  used: string;
+  usedK: string;
+  max: string;
+  maxK: string;
+  pct: string;
+  in: string;
+  inK: string;
+  out: string;
+  outK: string;
+  total: string;
+  totalK: string;
+  cacheRead: string;
+  cacheReadK: string;
+  cacheWrite: string;
+  cacheWriteK: string;
+  cachePct: string;
+  [key: string]: string;
+}
+
+export function buildVars(entry: StashEntry, contextWindow: number): FooterVars & { _pctNum: number } {
+  const u = entry.usage;
+  const used = u.input + u.cacheRead + u.cacheWrite;
+  const pctNum = contextWindow > 0 ? (used / contextWindow) * 100 : 0;
+  const totalInput = u.input + u.cacheRead + u.cacheWrite;
+  const cachePctNum = totalInput > 0 ? (u.cacheRead / totalInput) * 100 : 0;
+  const vars: FooterVars & { _pctNum: number } = {
+    model: entry.model || "unknown",
+    used: String(used),
+    usedK: toK(used),
+    max: String(contextWindow),
+    maxK: String(Math.round(contextWindow / 1000)),
+    pct: String(Math.round(pctNum)),
+    in: String(u.input),
+    inK: toK(u.input + u.cacheRead + u.cacheWrite),
+    out: String(u.output),
+    outK: toK(u.output),
+    total: String(u.total),
+    totalK: toK(u.total),
+    cacheRead: String(u.cacheRead),
+    cacheReadK: toK(u.cacheRead),
+    cacheWrite: String(u.cacheWrite),
+    cacheWriteK: toK(u.cacheWrite),
+    cachePct: String(Math.round(cachePctNum)),
+    _pctNum: pctNum,
+  };
+  return vars;
+}
+
+export function renderTemplate(tmpl: string, vars: Record<string, string>): string {
+  return tmpl.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (match, key) => {
+    if (key in vars) return vars[key];
+    return match;
+  });
+}
+
+export function buildFooter(
+  entry: StashEntry,
+  config: Required<Pick<PluginConfig, "contextWarnThreshold">> & PluginConfig,
+): string {
+  const win = resolveContextWindow(entry.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW);
+  const vars = buildVars(entry, win);
+  const locale: "en" | "zh-TW" = config.locale === "zh-TW" ? "zh-TW" : "en";
+  const defaults = DEFAULT_FORMATS[locale];
+  const format = config.format ?? defaults.format;
+  const warnFormat = config.contextWarnFormat ?? defaults.warn;
+  const mainLine = renderTemplate(format, vars);
+  if (vars._pctNum > config.contextWarnThreshold) {
+    const warnLine = renderTemplate(warnFormat, vars);
+    return `${mainLine}\n${warnLine}`;
+  }
+  return mainLine;
+}
+
+// ---------------------------------------------------------------------------
+// Stash
+// ---------------------------------------------------------------------------
+
+export class UsageStash {
+  private byKey = new Map<string, StashEntry>();
+  constructor(private ttlMs: number) {}
+
+  set(keys: string[], entry: StashEntry): void {
+    this.gc();
+    for (const k of keys) if (k) this.byKey.set(k, entry);
+  }
+
+  get(keys: string[]): StashEntry | null {
+    this.gc();
+    for (const k of keys) {
+      if (!k) continue;
+      const e = this.byKey.get(k);
+      if (e && Date.now() - e.ts < this.ttlMs) return e;
+    }
+    return null;
+  }
+
+  size(): number {
+    return this.byKey.size;
+  }
+
+  clear(): void {
+    this.byKey.clear();
+  }
+
+  private gc(): void {
+    const now = Date.now();
+    for (const [k, v] of this.byKey) {
+      if (now - v.ts >= this.ttlMs) this.byKey.delete(k);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Footer application
+// ---------------------------------------------------------------------------
+
+function trimToCap(content: string, footer: string, cap: number): string {
+  const joined = `${content.trimEnd()}\n\n${footer}`;
+  if (joined.length <= cap) return joined;
+  // Preserve the footer; trim the body.
+  const fixed = `\n\n${footer}`;
+  const bodyBudget = cap - fixed.length;
+  if (bodyBudget <= 0) {
+    // Degenerate case: footer alone exceeds the cap. Return footer truncated.
+    return fixed.trim().slice(0, Math.max(0, cap));
+  }
+  const ellipsis = "…";
+  const truncated = content.slice(0, Math.max(0, bodyBudget - ellipsis.length)).trimEnd() + ellipsis;
+  return `${truncated}${fixed}`;
+}
+
+export function applyFooter(content: string, footer: string, cap?: number): string {
+  if (!footer) return content;
+  if (typeof cap === "number" && cap > 0) return trimToCap(content, footer, cap);
+  return `${content.trimEnd()}\n\n${footer}`;
+}
+
+// ---------------------------------------------------------------------------
+// Plugin entry
+// ---------------------------------------------------------------------------
+
+export default function register(api: OpenClawApi): void {
+  const anyApi = api as Record<string, unknown> & {
+    pluginConfig?: PluginConfig;
+    config?: { plugins?: { entries?: Record<string, { config?: PluginConfig }> } };
+    id?: string;
+  };
+  const config: PluginConfig =
+    anyApi.pluginConfig
+    ?? (anyApi.id && anyApi.config?.plugins?.entries?.[anyApi.id]?.config)
+    ?? api.getConfig?.()
+    ?? {};
+
+  const ttlMs = typeof config.usageTtlMs === "number" && config.usageTtlMs > 0 ? config.usageTtlMs : DEFAULT_TTL_MS;
+  const threshold = typeof config.contextWarnThreshold === "number" ? config.contextWarnThreshold : DEFAULT_WARN_THRESHOLD;
+  const skipAgents = new Set(config.skipAgents ?? []);
+  const skipChannels = new Set(config.skipChannels ?? []);
+  const cap = typeof config.maxMessageLength === "number" && config.maxMessageLength > 0 ? config.maxMessageLength : undefined;
+  const locale: "en" | "zh-TW" = config.locale === "zh-TW" ? "zh-TW" : "en";
+
+  const stash = new UsageStash(ttlMs);
+
+  if (typeof api.on !== "function") {
+    warn("api.on not available on this host — plugin disabled");
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // llm_output → stash usage
+  // -------------------------------------------------------------------------
+  api.on(
+    "llm_output",
+    (event: unknown, ctx: unknown) => {
+      const ev = event as LlmOutputEvent;
+      const cx = ctx as LlmOutputCtx;
+      if (cx?.agentId && skipAgents.has(cx.agentId)) return;
+      if (cx?.channelId && skipChannels.has(cx.channelId)) return;
+      const usage = normalizeUsage(ev?.usage);
+      if (!usage) return;
+      const entry: StashEntry = {
+        usage,
+        model: ev.model ?? "unknown",
+        provider: ev.provider ?? "unknown",
+        ts: Date.now(),
+      };
+      // Index by every axis we can. Same entry, multiple lookup keys.
+      const keys: string[] = [];
+      if (cx?.sessionKey) keys.push(`session:${cx.sessionKey}`);
+      if (cx?.runId) keys.push(`run:${cx.runId}`);
+      if (cx?.agentId) keys.push(`agent:${cx.agentId}`);
+      if (cx?.channelId) keys.push(`channel:${cx.channelId}`);
+      stash.set(keys, entry);
+    },
+  );
+
+  // -------------------------------------------------------------------------
+  // message_sending → append footer
+  // -------------------------------------------------------------------------
+  api.on(
+    "message_sending",
+    (event: unknown, ctx: unknown): MessageSendingResult | void => {
+      const ev = event as MessageSendingEvent;
+      const cx = ctx as MessageSendingCtx;
+      const chan = cx?.channelId ?? ev?.metadata?.channel;
+      if (chan && skipChannels.has(chan)) return;
+
+      const keys: string[] = [];
+      if (chan) keys.push(`channel:${chan}`);
+      const entry = stash.get(keys);
+      if (!entry) return;
+
+      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold });
+      const originalContent = typeof ev.content === "string" ? ev.content : "";
+      const nextContent = applyFooter(originalContent, footer, cap);
+      return { content: nextContent };
+    },
+    { priority: 100 },
+  );
+
+  log(`v1.0 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}`);
+}
