@@ -1,32 +1,28 @@
 {
   "id": "token-footer-injector",
   "name": "Token Footer Injector",
-  "version": "1.0.6",
-  "description": "Automatically appends a token-usage footer to outbound agent messages. The model does not write the footer; the plugin reads the real `usage` object from the llm_output hook and appends a deterministic line during message_sending. 100% hit-rate, 0 model tokens.",
+  "version": "2.0.0",
+  "description": "Automatically appends a cumulative token-usage footer to outbound agent messages. Tracks session totals (turns, in/out tokens, cache %). The model does not write the footer; the plugin reads the real `usage` object from the llm_output hook. 100% hit-rate, 0 model tokens.",
   "entry": "./index.js",
   "configSchema": {
     "type": "object",
     "properties": {
-      "format": {
-        "type": "string",
-        "description": "Footer template. Placeholders: {model} {used} {usedK} {max} {maxK} {pct} {in} {inK} {out} {outK} {total} {totalK} {cacheRead} {cacheReadK} {cacheWrite} {cacheWriteK} {cachePct}."
-      },
-      "contextWarnFormat": {
-        "type": "string",
-        "description": "Extra line appended when context usage exceeds contextWarnThreshold. Same placeholders as `format`."
-      },
-      "contextWarnThreshold": {
+      "newSessionThreshold": {
         "type": "number",
-        "description": "Percentage (0-100) above which `contextWarnFormat` is appended. Default 50."
+        "description": "Context usage percentage (0-100) above which a ⚠️ /new recommendation is shown. Default 70."
+      },
+      "cumulative": {
+        "type": "boolean",
+        "description": "When true (default), footer shows session-cumulative totals. When false, shows per-turn stats only."
       },
       "modelContextWindows": {
         "type": "object",
-        "description": "Map of model id → context-window size in tokens. Used for the {max}/{maxK}/{pct} placeholders. Supports exact match and prefix match.",
+        "description": "Map of model id → context-window size in tokens. Supports exact match and prefix match. Takes priority over host config.",
         "additionalProperties": { "type": "number" }
       },
       "defaultContextWindow": {
         "type": "number",
-        "description": "Fallback context-window size when the model is not in `modelContextWindows`. Default 128000."
+        "description": "Fallback context-window size when the model is not found anywhere. Default 128000."
       },
       "skipAgents": {
         "type": "array",
@@ -49,11 +45,11 @@
       "locale": {
         "type": "string",
         "enum": ["en", "zh-TW"],
-        "description": "Default language for the built-in format strings when `format` is not set. Default 'en'."
+        "description": "Language for warning messages. Default 'en'."
       },
       "debug": {
         "type": "boolean",
-        "description": "When true, emits `[token-footer-injector]` log lines on every llm_output and message_sending hook fire. Useful for diagnosing where footer injection drops off. Default false."
+        "description": "When true, emits `[token-footer-injector]` log lines on every hook fire. Default false."
       }
     },
     "additionalProperties": false

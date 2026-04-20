@@ -19,23 +19,13 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // index.ts
 var index_exports = {};
 __export(index_exports, {
-  UsageStash: () => UsageStash,
-  applyFooter: () => applyFooter,
-  buildFooter: () => buildFooter,
-  buildVars: () => buildVars,
-  default: () => register,
-  extractHostContextWindows: () => extractHostContextWindows,
-  isAnthropicStyleUsage: () => isAnthropicStyleUsage,
-  normalizeUsage: () => normalizeUsage,
-  renderTemplate: () => renderTemplate,
-  resolveContextWindow: () => resolveContextWindow
+  default: () => register
 });
 module.exports = __toCommonJS(index_exports);
 var DEFAULT_TTL_MS = 6e4;
 var DEFAULT_CONTEXT_WINDOW = 128e3;
-var DEFAULT_WARN_THRESHOLD = 50;
-var DEFAULT_MODEL_CONTEXT_WINDOWS = {
-  // Anthropic
+var DEFAULT_NEW_SESSION_THRESHOLD = 70;
+var DEFAULT_CONTEXT_WINDOWS = {
   "claude-opus-4-7[1m]": 1e6,
   "claude-opus-4-7": 2e5,
   "claude-opus-4-6": 2e5,
@@ -46,8 +36,6 @@ var DEFAULT_MODEL_CONTEXT_WINDOWS = {
   "claude-3-5-haiku": 2e5,
   "claude-3-opus": 2e5,
   "claude-": 2e5,
-  // prefix fallback
-  // OpenAI
   "gpt-5.4-mini": 2e5,
   "gpt-5.4": 2e5,
   "gpt-5": 256e3,
@@ -56,33 +44,15 @@ var DEFAULT_MODEL_CONTEXT_WINDOWS = {
   "gpt-4": 128e3,
   "o1": 2e5,
   "o3": 2e5,
-  // Qwen / Alibaba
   "qwen3.6-plus": 131072,
   "qwen3-plus": 131072,
   "qwen3-max": 262144,
   "qwen3-": 131072,
   "qwen-": 131072,
-  // Others
   "glm-4.6": 128e3,
   "kimi-k2": 128e3,
   "deepseek-": 128e3,
   "minimax-": 245760
-};
-function isAnthropicStyleUsage(provider, usage) {
-  if (usage.cacheRead > usage.input) return true;
-  if (!provider) return false;
-  const p = provider.toLowerCase();
-  return p === "anthropic" || p === "claude-cli" || p === "claude-code" || p.startsWith("claude") || p === "openai-codex" || p === "kimi" || p === "minimax-portal";
-}
-var DEFAULT_FORMATS = {
-  en: {
-    format: "\u{1F4CA} {model} | {usedK}k/{maxK}k ({pct}%) \xB7 {inK}\u2192{outK}k tokens \xB7 cache {cachePct}%",
-    warn: "\u26A0\uFE0F context {pct}%, suggest /compact"
-  },
-  "zh-TW": {
-    format: "\u{1F4CA} {model} | {usedK}k/{maxK}k ({pct}%) \xB7 {inK}\u2192{outK}k tokens \xB7 cache {cachePct}%",
-    warn: "\u26A0\uFE0F context {pct}%,\u5EFA\u8B70 /compact"
-  }
 };
 function log(msg) {
   console.log(`[token-footer-injector] ${msg}`);
@@ -123,16 +93,11 @@ function extractHostContextWindows(hostConfig) {
   return out;
 }
 function resolveContextWindow(model, overrides, fallback, hostMap) {
-  const tiers = [
-    overrides,
-    hostMap,
-    DEFAULT_MODEL_CONTEXT_WINDOWS
-  ];
+  const tiers = [overrides, hostMap, DEFAULT_CONTEXT_WINDOWS];
   for (const tier of tiers) {
     if (!tier) continue;
     if (tier[model]) return tier[model];
-    let best = 0;
-    let bestLen = 0;
+    let best = 0, bestLen = 0;
     for (const key of Object.keys(tier)) {
       if (model.startsWith(key) && key.length > bestLen) {
         best = tier[key];
@@ -148,63 +113,39 @@ function toK(n) {
   const k = n / 1e3;
   return k < 10 ? k.toFixed(1) : String(Math.round(k));
 }
-function buildVars(entry, contextWindow) {
-  const u = entry.usage;
-  const used = u.cacheRead > 0 ? u.cacheRead : u.input;
-  const pctNum = contextWindow > 0 ? used / contextWindow * 100 : 0;
-  const anthropicStyle = isAnthropicStyleUsage(entry.provider, u);
-  const cacheDenom = anthropicStyle ? u.input + u.cacheRead + u.cacheWrite : u.input;
-  const cachePctNum = cacheDenom > 0 ? u.cacheRead / cacheDenom * 100 : 0;
-  const vars = {
-    model: entry.model || "unknown",
-    used: String(used),
-    usedK: toK(used),
-    max: String(contextWindow),
-    maxK: String(Math.round(contextWindow / 1e3)),
-    pct: String(Math.round(pctNum)),
-    // {in}/{inK} show the current turn's non-cached input (matches
-    // `/status` "Tokens: Nk in"), not the full prompt side.
-    in: String(u.input),
-    inK: toK(u.input),
-    out: String(u.output),
-    outK: toK(u.output),
-    total: String(u.total),
-    totalK: toK(u.total),
-    cacheRead: String(u.cacheRead),
-    cacheReadK: toK(u.cacheRead),
-    cacheWrite: String(u.cacheWrite),
-    cacheWriteK: toK(u.cacheWrite),
-    cachePct: String(Math.round(cachePctNum)),
-    _pctNum: pctNum
-  };
-  return vars;
-}
-function renderTemplate(tmpl, vars) {
-  return tmpl.replace(/\{([a-zA-Z_][a-zA-Z0-9_]*)\}/g, (match, key) => {
-    if (key in vars) return vars[key];
-    return match;
-  });
-}
-function buildFooter(entry, config, hostMap) {
-  const win = resolveContextWindow(
-    entry.model,
-    config.modelContextWindows,
-    config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW,
-    hostMap
-  );
-  const vars = buildVars(entry, win);
-  const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
-  const defaults = DEFAULT_FORMATS[locale];
-  const format = config.format ?? defaults.format;
-  const warnFormat = config.contextWarnFormat ?? defaults.warn;
-  const mainLine = renderTemplate(format, vars);
-  if (vars._pctNum > config.contextWarnThreshold) {
-    const warnLine = renderTemplate(warnFormat, vars);
-    return `${mainLine}
-${warnLine}`;
+var SessionAccumulator = class {
+  bySession = /* @__PURE__ */ new Map();
+  byChannel = /* @__PURE__ */ new Map();
+  // channelId -> sessionKey
+  add(sessionKey, channelId, usage, model, provider) {
+    let acc = this.bySession.get(sessionKey);
+    if (!acc) {
+      acc = { sessionKey, model, provider, ts: Date.now(), callCount: 0, totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0 };
+      this.bySession.set(sessionKey, acc);
+    }
+    acc.callCount++;
+    acc.totalInput += usage.input;
+    acc.totalOutput += usage.output;
+    acc.totalCacheRead += usage.cacheRead;
+    acc.totalCacheWrite += usage.cacheWrite;
+    acc.model = model;
+    acc.provider = provider;
+    acc.ts = Date.now();
+    if (channelId) this.byChannel.set(channelId, sessionKey);
+    return acc;
   }
-  return mainLine;
-}
+  getBySession(sessionKey) {
+    return this.bySession.get(sessionKey) ?? null;
+  }
+  getByChannel(channelId) {
+    const sk = this.byChannel.get(channelId);
+    if (!sk) return null;
+    return this.bySession.get(sk) ?? null;
+  }
+  size() {
+    return this.bySession.size;
+  }
+};
 var UsageStash = class {
   constructor(ttlMs) {
     this.ttlMs = ttlMs;
@@ -227,9 +168,6 @@ var UsageStash = class {
   size() {
     return this.byKey.size;
   }
-  clear() {
-    this.byKey.clear();
-  }
   gc() {
     const now = Date.now();
     for (const [k, v] of this.byKey) {
@@ -246,12 +184,8 @@ ${footer}`;
 
 ${footer}`;
   const bodyBudget = cap - fixed.length;
-  if (bodyBudget <= 0) {
-    return fixed.trim().slice(0, Math.max(0, cap));
-  }
-  const ellipsis = "\u2026";
-  const truncated = content.slice(0, Math.max(0, bodyBudget - ellipsis.length)).trimEnd() + ellipsis;
-  return `${truncated}${fixed}`;
+  if (bodyBudget <= 0) return fixed.trim().slice(0, Math.max(0, cap));
+  return content.slice(0, Math.max(0, bodyBudget - 1)).trimEnd() + `\u2026${fixed}`;
 }
 function applyFooter(content, footer, cap) {
   if (!footer) return content;
@@ -260,111 +194,143 @@ function applyFooter(content, footer, cap) {
 
 ${footer}`;
 }
+function buildCumulativeFooter(acc, contextWindow, newSessionThreshold, locale) {
+  const used = acc.totalCacheRead > 0 ? acc.totalCacheRead : acc.totalInput;
+  const pctNum = contextWindow > 0 ? used / contextWindow * 100 : 0;
+  const cacheDenom = acc.totalInput + acc.totalCacheRead + acc.totalCacheWrite;
+  const cachePctNum = cacheDenom > 0 ? Math.round(acc.totalCacheRead / cacheDenom * 100) : 0;
+  const modelShort = acc.model.replace(/^.*\//, "");
+  const warn2 = pctNum > newSessionThreshold ? locale === "zh-TW" ? ` \u26A0\uFE0F \u5EFA\u8B70 /new` : ` \u26A0\uFE0F /new` : "";
+  const line1 = `\u{1F4CA} ${modelShort}\uFF5C${toK(used)}k/${Math.round(contextWindow / 1e3)}k (${Math.round(pctNum)}%) \xB7 ${acc.callCount} \u8F2A${warn2}`;
+  const line2 = `  in ${toK(acc.totalInput)}k \xB7 out ${toK(acc.totalOutput)}k \xB7 cache ${cachePctNum}%`;
+  return { footer: `${line1}
+${line2}`, pctNum };
+}
 function register(api) {
   const anyApi = api;
   const config = anyApi.pluginConfig ?? (anyApi.id && anyApi.config?.plugins?.entries?.[anyApi.id]?.config) ?? api.getConfig?.() ?? {};
   const ttlMs = typeof config.usageTtlMs === "number" && config.usageTtlMs > 0 ? config.usageTtlMs : DEFAULT_TTL_MS;
-  const threshold = typeof config.contextWarnThreshold === "number" ? config.contextWarnThreshold : DEFAULT_WARN_THRESHOLD;
+  const newSessionTh = typeof config.newSessionThreshold === "number" ? config.newSessionThreshold : DEFAULT_NEW_SESSION_THRESHOLD;
   const skipAgents = new Set(config.skipAgents ?? []);
   const skipChannels = new Set(config.skipChannels ?? []);
   const cap = typeof config.maxMessageLength === "number" && config.maxMessageLength > 0 ? config.maxMessageLength : void 0;
   const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
   const debug = config.debug === true;
+  const cumulative = config.cumulative !== false;
   const hostMap = extractHostContextWindows(anyApi.config);
   const stash = new UsageStash(ttlMs);
+  const accumulator = new SessionAccumulator();
   if (typeof api.on !== "function") {
-    warn("api.on not available on this host \u2014 plugin disabled");
+    warn("api.on not available \u2014 plugin disabled");
     return;
   }
-  api.on(
-    "llm_output",
-    (event, ctx) => {
-      const ev = event;
-      const cx = ctx;
-      if (debug) log(`llm_output FIRE agentId=${cx?.agentId} channelId=${cx?.channelId} sessionKey=${cx?.sessionKey} model=${ev?.model} usage=${JSON.stringify(ev?.usage)}`);
-      if (cx?.agentId && skipAgents.has(cx.agentId)) return;
-      if (cx?.channelId && skipChannels.has(cx.channelId)) return;
-      const usage = normalizeUsage(ev?.usage);
-      if (!usage) {
-        if (debug) log(`llm_output SKIP: usage could not be normalized`);
-        return;
+  api.on("llm_output", (event, ctx) => {
+    const ev = event;
+    const cx = ctx;
+    if (debug) log(`llm_output FIRE sessionKey=${cx?.sessionKey} channelId=${cx?.channelId} model=${ev?.model}`);
+    if (cx?.agentId && skipAgents.has(cx.agentId)) return;
+    if (cx?.channelId && skipChannels.has(cx.channelId)) return;
+    const usage = normalizeUsage(ev?.usage);
+    if (!usage) {
+      if (debug) log(`llm_output SKIP: no normalized usage`);
+      return;
+    }
+    const model = ev.model ?? "unknown";
+    const provider = ev.provider ?? "unknown";
+    if (cx?.sessionKey && cumulative) {
+      const acc = accumulator.add(cx.sessionKey, cx.channelId ?? "", usage, model, provider);
+      if (debug) log(`llm_output ACCUM session=${cx.sessionKey} calls=${acc.callCount} totalIn=${acc.totalInput} totalOut=${acc.totalOutput}`);
+    }
+    const entry = { usage, model, provider, ts: Date.now(), consumed: false };
+    const keys = [];
+    if (cx?.sessionKey) keys.push(`session:${cx.sessionKey}`);
+    if (cx?.runId) keys.push(`run:${cx.runId}`);
+    if (cx?.agentId) keys.push(`agent:${cx.agentId}`);
+    if (cx?.channelId) keys.push(`channel:${cx.channelId}`);
+    stash.set(keys, entry);
+    if (cumulative && cx?.sessionKey) {
+      const acc = accumulator.getBySession(cx.sessionKey);
+      if (acc) {
+        const cw = resolveContextWindow(acc.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
+        const { footer } = buildCumulativeFooter(acc, cw, newSessionTh, locale);
+        if (footer) {
+          const firstLine = footer.split("\n", 1)[0];
+          const texts = ev.assistantTexts;
+          const tail = Array.isArray(texts) && texts.length > 0 ? texts[texts.length - 1] : void 0;
+          if (typeof tail === "string" && !tail.includes(firstLine)) {
+            texts[texts.length - 1] = applyFooter(tail, footer, cap);
+            if (ev.lastAssistant && typeof ev.lastAssistant === "object" && typeof ev.lastAssistant.text === "string" && !ev.lastAssistant.text.includes(firstLine)) {
+              ev.lastAssistant.text = applyFooter(ev.lastAssistant.text, footer, cap);
+            }
+            if (debug) log(`llm_output MUTATE cumulative footer appended`);
+          }
+        }
       }
-      const entry = {
-        usage,
-        model: ev.model ?? "unknown",
-        provider: ev.provider ?? "unknown",
-        ts: Date.now(),
-        consumed: false
-      };
-      const keys = [];
-      if (cx?.sessionKey) keys.push(`session:${cx.sessionKey}`);
-      if (cx?.runId) keys.push(`run:${cx.runId}`);
-      if (cx?.agentId) keys.push(`agent:${cx.agentId}`);
-      if (cx?.channelId) keys.push(`channel:${cx.channelId}`);
-      stash.set(keys, entry);
-      if (debug) log(`llm_output STASH keys=[${keys.join(",")}] size=${stash.size()}`);
-      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold }, hostMap);
-      if (!footer) return;
+    } else if (!cumulative) {
+      const cw = resolveContextWindow(model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
+      const used = usage.cacheRead > 0 ? usage.cacheRead : usage.input;
+      const pctNum = cw > 0 ? used / cw * 100 : 0;
+      const cacheDenom = usage.input + usage.cacheRead + usage.cacheWrite;
+      const cachePct = cacheDenom > 0 ? Math.round(usage.cacheRead / cacheDenom * 100) : 0;
+      const modelShort = model.replace(/^.*\//, "");
+      const footer = `\u{1F4CA} ${modelShort}\uFF5C${toK(used)}k/${Math.round(cw / 1e3)}k (${Math.round(pctNum)}%) \xB7 ${toK(usage.input)}\u2192${toK(usage.output)}k \xB7 cache ${cachePct}%`;
       const firstLine = footer.split("\n", 1)[0];
       const texts = ev.assistantTexts;
       const tail = Array.isArray(texts) && texts.length > 0 ? texts[texts.length - 1] : void 0;
       if (typeof tail === "string" && !tail.includes(firstLine)) {
-        const next = applyFooter(tail, footer, cap);
-        texts[texts.length - 1] = next;
+        texts[texts.length - 1] = applyFooter(tail, footer, cap);
         if (ev.lastAssistant && typeof ev.lastAssistant === "object" && typeof ev.lastAssistant.text === "string" && !ev.lastAssistant.text.includes(firstLine)) {
           ev.lastAssistant.text = applyFooter(ev.lastAssistant.text, footer, cap);
         }
-        if (debug) log(`llm_output MUTATE assistantTexts[last] appended footer`);
-      } else if (debug) {
-        log(`llm_output MUTATE skip: tail already contains footer or no tail text`);
       }
     }
-  );
-  api.on(
-    "message_sending",
-    (event, ctx) => {
-      const ev = event;
-      const cx = ctx;
-      const chan = cx?.channelId ?? ev?.metadata?.channel;
-      if (debug) log(`message_sending FIRE to=${ev?.to} channelId=${cx?.channelId} metaChannel=${ev?.metadata?.channel} accountId=${cx?.accountId} contentLen=${ev?.content?.length ?? 0}`);
-      if (chan && skipChannels.has(chan)) return;
-      const keys = [];
-      if (chan) keys.push(`channel:${chan}`);
-      const entry = stash.get(keys);
-      if (!entry) {
-        if (debug) log(`message_sending MISS: no stash entry for keys=[${keys.join(",")}], stashSize=${stash.size()}`);
+  });
+  api.on("message_sending", (event, ctx) => {
+    const ev = event;
+    const cx = ctx;
+    const chan = cx?.channelId ?? ev?.metadata?.channel;
+    if (debug) log(`message_sending FIRE channelId=${chan}`);
+    if (chan && skipChannels.has(chan)) return;
+    let footer = null;
+    if (cumulative) {
+      const acc = accumulator.getByChannel(chan ?? "");
+      if (acc) {
+        const cw = resolveContextWindow(acc.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
+        footer = buildCumulativeFooter(acc, cw, newSessionTh, locale).footer;
+      }
+    }
+    if (!footer) {
+      const keys2 = [];
+      if (chan) keys2.push(`channel:${chan}`);
+      const entry2 = stash.get(keys2);
+      if (!entry2) {
+        if (debug) log(`message_sending MISS`);
         return;
       }
-      const footer = buildFooter(entry, { ...config, contextWarnThreshold: threshold }, hostMap);
-      const originalContent = typeof ev.content === "string" ? ev.content : "";
-      const firstLine = footer.split("\n", 1)[0];
-      if (originalContent.includes(firstLine)) {
-        if (debug) log(`message_sending SKIP: content already contains footer`);
-        return;
-      }
-      if (entry.consumed) {
-        if (debug) log(`message_sending SKIP: stash entry already consumed for this turn`);
-        return;
-      }
-      entry.consumed = true;
-      const nextContent = applyFooter(originalContent, footer, cap);
-      if (debug) log(`message_sending APPEND: footer='${firstLine}' appended (stash consumed)`);
-      return { content: nextContent };
-    },
-    { priority: 100 }
-  );
-  const hostMapCount = Object.keys(hostMap).length;
-  log(`v1.0.6 init: ttlMs=${ttlMs}, threshold=${threshold}%, locale=${locale}, skipAgents=[${[...skipAgents].join(",")}], skipChannels=[${[...skipChannels].join(",")}], cap=${cap ?? "none"}, debug=${debug}, hostContextWindows=${hostMapCount}`);
+      const cw = resolveContextWindow(entry2.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
+      const used = entry2.usage.cacheRead > 0 ? entry2.usage.cacheRead : entry2.usage.input;
+      const pctNum = cw > 0 ? used / cw * 100 : 0;
+      const cacheDenom = entry2.usage.input + entry2.usage.cacheRead + entry2.usage.cacheWrite;
+      const cachePct = cacheDenom > 0 ? Math.round(entry2.usage.cacheRead / cacheDenom * 100) : 0;
+      const modelShort = entry2.model.replace(/^.*\//, "");
+      footer = `\u{1F4CA} ${modelShort}\uFF5C${toK(used)}k/${Math.round(cw / 1e3)}k (${Math.round(pctNum)}%) \xB7 ${toK(entry2.usage.input)}\u2192${toK(entry2.usage.output)}k \xB7 cache ${cachePct}%`;
+    }
+    if (!footer) return;
+    const originalContent = typeof ev.content === "string" ? ev.content : "";
+    const firstLine = footer.split("\n", 1)[0];
+    if (originalContent.includes(firstLine)) {
+      if (debug) log(`message_sending SKIP: already has footer`);
+      return;
+    }
+    const keys = [];
+    if (chan) keys.push(`channel:${chan}`);
+    const entry = stash.get(keys);
+    if (entry?.consumed) {
+      if (debug) log(`message_sending SKIP: consumed`);
+      return;
+    }
+    if (entry) entry.consumed = true;
+    return { content: applyFooter(originalContent, footer, cap) };
+  }, { priority: 100 });
+  log(`v2.0 init: cumulative=${cumulative}, ttlMs=${ttlMs}, newSession=${newSessionTh}%, locale=${locale}, debug=${debug}`);
 }
-// Annotate the CommonJS export names for ESM import in node:
-0 && (module.exports = {
-  UsageStash,
-  applyFooter,
-  buildFooter,
-  buildVars,
-  extractHostContextWindows,
-  isAnthropicStyleUsage,
-  normalizeUsage,
-  renderTemplate,
-  resolveContextWindow
-});

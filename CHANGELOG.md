@@ -4,6 +4,41 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] — 2026-04-19
+
+### Changed
+- **Session-cumulative footer** (default, `cumulative: true`). Each turn now
+  appends to a running `SessionAccumulator` keyed by `sessionKey`. The footer
+  shows session totals, not per-call numbers:
+  ```
+  📊 qwen3.6-plus｜245k/2000k (12%) · 3 輪
+    in 245k · out 8k · cache 64%
+  ```
+- **New session warning** replaces the old `contextWarnThreshold` /
+  `contextWarnFormat` pair. A single `newSessionThreshold` (default 70%)
+  appends ` ⚠️ 建議 /new` (zh-TW) or ` ⚠️ /new` (en) inline on the first
+  line when context usage exceeds the threshold.
+- **Cache% always shown** on line 2. Previously the cache line only appeared
+  above 30% context usage; now it is always present.
+- **Removed cost/pricing display**. `ModelPricing`, `calcCost`, `fmtTWD`,
+  `DEFAULT_MODEL_PRICING`, and `resolvePricing` are gone. `totalCost` /
+  `totalSaved` removed from the accumulator. No TWD or USD values are shown.
+
+### Added
+- `cumulative` config flag (boolean, default `true`). Set to `false` to
+  restore single-line per-call v1 behavior.
+- `newSessionThreshold` config option (number 0-100, default 70).
+
+### Removed
+- `format`, `contextWarnFormat`, `contextWarnThreshold`, `modelPricing`,
+  `currency` config options.
+
+### Smoke tests
+- Fully rewritten for v2.0 end-to-end behavior. 11 suites, 25 assertions.
+  Tests: registration, assistantTexts mutation, multi-turn accumulation,
+  consume-once, new-session warning, skipChannels, no-stash passthrough,
+  non-cumulative mode, maxMessageLength cap. 25/25 pass.
+
 ## [1.0.6] — 2026-04-19
 
 ### Fixed
