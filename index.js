@@ -1,6 +1,8 @@
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -14,6 +16,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // index.ts
@@ -22,43 +32,105 @@ __export(index_exports, {
   default: () => register
 });
 module.exports = __toCommonJS(index_exports);
-var DEFAULT_TTL_MS = 6e4;
-var DEFAULT_CONTEXT_WINDOW = 128e3;
-var DEFAULT_NEW_SESSION_THRESHOLD = 70;
-var DEFAULT_CONTEXT_WINDOWS = {
-  "claude-opus-4-7[1m]": 1e6,
-  "claude-opus-4-7": 2e5,
-  "claude-opus-4-6": 2e5,
-  "claude-sonnet-4-6": 2e5,
-  "claude-haiku-4-5": 2e5,
-  "claude-3-7-sonnet": 2e5,
-  "claude-3-5-sonnet": 2e5,
-  "claude-3-5-haiku": 2e5,
-  "claude-3-opus": 2e5,
-  "claude-": 2e5,
-  "gpt-5.4-mini": 2e5,
-  "gpt-5.4": 2e5,
-  "gpt-5": 256e3,
-  "gpt-4.1": 1e6,
-  "gpt-4o": 128e3,
-  "gpt-4": 128e3,
-  "o1": 2e5,
-  "o3": 2e5,
-  "qwen3.6-plus": 131072,
-  "qwen3-plus": 131072,
-  "qwen3-max": 262144,
-  "qwen3-": 131072,
-  "qwen-": 131072,
-  "glm-4.6": 128e3,
-  "kimi-k2": 128e3,
-  "deepseek-": 128e3,
-  "minimax-": 245760
+var fs = __toESM(require("node:fs"));
+var path = __toESM(require("node:path"));
+var os = __toESM(require("node:os"));
+var CONTEXT_WINDOWS = {
+  "qwen3.6-plus": 2048e3,
+  "qwen3-coder-next": 262144,
+  "qwen3-max": 131072,
+  "claude-sonnet-4": 2e5,
+  "claude-opus-4": 2e5,
+  "gpt-5": 4e5,
+  "gemini-2.5-pro": 1048576,
+  "glm-5": 256e3,
+  "mimo-v2.5-pro": 1048576
 };
-function log(msg) {
-  console.log(`[token-footer-injector] ${msg}`);
+function getContextWindow(model) {
+  const short = model.replace(/^.*\//, "");
+  for (const [key, val] of Object.entries(CONTEXT_WINDOWS)) {
+    if (short.includes(key) || key.includes(short)) return val;
+  }
+  if (/qwen/i.test(short)) return 1048576;
+  if (/claude/i.test(short)) return 2e5;
+  if (/gpt/i.test(short)) return 4e5;
+  if (/gemini/i.test(short)) return 1048576;
+  return 2e5;
 }
-function warn(msg) {
-  console.log(`[token-footer-injector] WARN: ${msg}`);
+function resolveStateDir() {
+  const override = process.env.OPENCLAW_STATE_DIR?.trim();
+  if (override) return override;
+  const home = process.env.OPENCLAW_HOME?.trim() || os.homedir();
+  return path.join(home, ".openclaw");
+}
+function resolveSessionStorePath(agentId) {
+  return path.join(resolveStateDir(), "agents", (agentId ?? "main").trim() || "main", "sessions", "sessions.json");
+}
+function readSessionStore(agentId) {
+  const storePath = resolveSessionStorePath(agentId);
+  if (!fs.existsSync(storePath)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(storePath, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function readSessionEntry(agentId, sessionKey) {
+  if (!sessionKey) return null;
+  const store = readSessionStore(agentId);
+  const direct = store[sessionKey];
+  if (direct) return direct;
+  const normalized = sessionKey.toLowerCase().trim();
+  let best = null;
+  let bestTs = 0;
+  for (const [k, v] of Object.entries(store)) {
+    if (k.toLowerCase() !== normalized) continue;
+    const ts = v?.updatedAt ?? 0;
+    if (!best || ts > bestTs) {
+      best = v;
+      bestTs = ts;
+    }
+  }
+  return best;
+}
+function inferAgentIdFromSessionKey(sessionKey) {
+  const match = typeof sessionKey === "string" ? /^agent:([^:]+):/.exec(sessionKey) : null;
+  return match?.[1];
+}
+function candidateAgentIds(agentId, sessionKey) {
+  const ids = [agentId, inferAgentIdFromSessionKey(sessionKey), "main"].filter((v) => !!v && v.trim().length > 0);
+  return [...new Set(ids)];
+}
+function readSessionMatch(agentId, sessionKey) {
+  for (const id of candidateAgentIds(agentId, sessionKey)) {
+    const entry = readSessionEntry(id, sessionKey);
+    if (entry) return { agentId: id, sessionKey, entry };
+  }
+  return null;
+}
+function findSessionMatch(agentId, opts) {
+  if (opts.sessionKey) {
+    const exact = readSessionMatch(agentId, opts.sessionKey);
+    if (exact) return exact;
+  }
+  const convId = opts.conversationId ? String(opts.conversationId) : "";
+  const channel = opts.channelId ? String(opts.channelId) : "";
+  let best = null;
+  let bestTs = 0;
+  for (const id of candidateAgentIds(agentId, opts.sessionKey)) {
+    const store = readSessionStore(id);
+    for (const [key, entry] of Object.entries(store)) {
+      if (opts.sessionKey && key.toLowerCase() !== opts.sessionKey.toLowerCase()) continue;
+      if (convId && !key.includes(convId)) continue;
+      if (channel && !key.includes(channel)) continue;
+      const ts = entry?.updatedAt ?? 0;
+      if (!best || ts > bestTs) {
+        best = { agentId: id, sessionKey: key, entry };
+        bestTs = ts;
+      }
+    }
+  }
+  return best;
 }
 function toNum(v) {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
@@ -69,268 +141,159 @@ function normalizeUsage(raw) {
   const output = toNum(raw.output) || toNum(raw.output_tokens) || toNum(raw.completion_tokens);
   const cacheRead = toNum(raw.cacheRead) || toNum(raw.cache_read_input_tokens) || toNum(raw.cacheReadTokens);
   const cacheWrite = toNum(raw.cacheWrite) || toNum(raw.cache_creation_input_tokens) || toNum(raw.cacheWriteTokens);
-  const total = toNum(raw.total) || toNum(raw.total_tokens) || input + output;
-  if (input === 0 && output === 0 && total === 0) return null;
-  return { input, output, cacheRead, cacheWrite, total };
+  if (input === 0 && output === 0 && cacheRead === 0 && cacheWrite === 0) return null;
+  return { input, output, cacheRead, cacheWrite };
 }
-function extractHostContextWindows(hostConfig) {
-  const out = {};
-  if (!hostConfig || typeof hostConfig !== "object") return out;
-  const providers = hostConfig?.models?.providers;
-  if (!providers || typeof providers !== "object") return out;
-  for (const [provId, prov] of Object.entries(providers)) {
-    const models = prov?.models;
-    if (!Array.isArray(models)) continue;
-    for (const m of models) {
-      if (!m || typeof m !== "object") continue;
-      const mm = m;
-      if (typeof mm.id !== "string") continue;
-      if (typeof mm.contextWindow !== "number" || !Number.isFinite(mm.contextWindow)) continue;
-      out[mm.id] = mm.contextWindow;
-      out[`${provId}/${mm.id}`] = mm.contextWindow;
-    }
+function formatTokenCount(value) {
+  if (!Number.isFinite(value)) return "0";
+  const safe = Math.max(0, value);
+  if (safe >= 1e6) return `${(safe / 1e6).toFixed(1)}m`;
+  if (safe >= 1e3) {
+    const precision = safe >= 1e4 ? 0 : 1;
+    const formatted = (safe / 1e3).toFixed(precision);
+    if (Number(formatted) >= 1e3) return `${(safe / 1e6).toFixed(1)}m`;
+    return `${formatted}k`;
   }
-  return out;
+  return String(Math.round(safe));
 }
-function resolveContextWindow(model, overrides, fallback, hostMap) {
-  const tiers = [overrides, hostMap, DEFAULT_CONTEXT_WINDOWS];
-  for (const tier of tiers) {
-    if (!tier) continue;
-    if (tier[model]) return tier[model];
-    let best = 0, bestLen = 0;
-    for (const key of Object.keys(tier)) {
-      if (model.startsWith(key) && key.length > bestLen) {
-        best = tier[key];
-        bestLen = key.length;
-      }
-    }
-    if (best > 0) return best;
-  }
-  return fallback;
+function buildFooter(params) {
+  const { entry, override, fallbackModel } = params;
+  const modelFull = entry?.modelProvider && entry?.model ? `${entry.modelProvider}/${entry.model}` : entry?.model ?? fallbackModel ?? "unknown";
+  const modelShort = modelFull.replace(/^.*\//, "");
+  const storedTotal = typeof entry?.totalTokens === "number" && entry.totalTokens > 0 ? entry.totalTokens : 0;
+  const hasFreshStoredContext = storedTotal > 0;
+  const input = hasFreshStoredContext && typeof entry?.inputTokens === "number" ? entry.inputTokens : override?.input ?? 0;
+  const output = hasFreshStoredContext && typeof entry?.outputTokens === "number" ? entry.outputTokens : override?.output ?? 0;
+  const cacheRead = hasFreshStoredContext && typeof entry?.cacheRead === "number" ? entry.cacheRead : override?.cacheRead ?? 0;
+  const cacheWrite = hasFreshStoredContext && typeof entry?.cacheWrite === "number" ? entry.cacheWrite : override?.cacheWrite ?? 0;
+  const window = entry?.contextTokens && entry.contextTokens > 0 ? entry.contextTokens : getContextWindow(modelFull);
+  const usage = storedTotal || override?.input || 0;
+  if (usage === 0 && input === 0 && output === 0) return null;
+  const pct = window > 0 ? Math.min(999, Math.round(usage / window * 100)) : 0;
+  return `\u{1F4CA} ${modelShort} | ${formatTokenCount(usage)}/${formatTokenCount(window)} (${pct}%) \xB7 ${formatTokenCount(input)}\u2192${formatTokenCount(output)} tokens \xB7 cache ${formatTokenCount(cacheRead)}`;
 }
-function toK(n) {
-  if (n < 1e3) return "0";
-  const k = n / 1e3;
-  return k < 10 ? k.toFixed(1) : String(Math.round(k));
+var FOOTER_RE = /\n*📊 [^\n]*\|[^\n]*\([^\n]*%\)[^\n]*tokens[^\n]*cache[^\n]*$/;
+function stripExistingFooter(text) {
+  return text.replace(FOOTER_RE, "").trimEnd();
 }
-var SessionAccumulator = class {
-  bySession = /* @__PURE__ */ new Map();
-  byChannel = /* @__PURE__ */ new Map();
-  // channelId -> sessionKey
-  add(sessionKey, channelId, usage, model, provider) {
-    let acc = this.bySession.get(sessionKey);
-    if (!acc) {
-      acc = { sessionKey, model, provider, ts: Date.now(), callCount: 0, totalInput: 0, totalOutput: 0, totalCacheRead: 0, totalCacheWrite: 0 };
-      this.bySession.set(sessionKey, acc);
-    }
-    acc.callCount++;
-    acc.totalInput += usage.input;
-    acc.totalOutput += usage.output;
-    acc.totalCacheRead += usage.cacheRead;
-    acc.totalCacheWrite += usage.cacheWrite;
-    acc.model = model;
-    acc.provider = provider;
-    acc.ts = Date.now();
-    if (channelId) this.byChannel.set(channelId, sessionKey);
-    return acc;
-  }
-  getBySession(sessionKey) {
-    return this.bySession.get(sessionKey) ?? null;
-  }
-  getByChannel(channelId) {
-    const sk = this.byChannel.get(channelId);
-    if (!sk) return null;
-    return this.bySession.get(sk) ?? null;
-  }
-  size() {
-    return this.bySession.size;
-  }
-};
-var UsageStash = class {
-  constructor(ttlMs) {
-    this.ttlMs = ttlMs;
-  }
-  ttlMs;
-  byKey = /* @__PURE__ */ new Map();
-  set(keys, entry) {
-    this.gc();
-    for (const k of keys) if (k) this.byKey.set(k, entry);
-  }
-  get(keys) {
-    this.gc();
-    for (const k of keys) {
-      if (!k) continue;
-      const e = this.byKey.get(k);
-      if (e && Date.now() - e.ts < this.ttlMs) return e;
-    }
-    return null;
-  }
-  size() {
-    return this.byKey.size;
-  }
-  gc() {
-    const now = Date.now();
-    for (const [k, v] of this.byKey) {
-      if (now - v.ts >= this.ttlMs) this.byKey.delete(k);
-    }
-  }
-};
-function trimToCap(content, footer, cap) {
-  const joined = `${content.trimEnd()}
+function appendFooter(text, footer, cap) {
+  const cleaned = stripExistingFooter(text);
+  const joined = `${cleaned}
 
 ${footer}`;
-  if (joined.length <= cap) return joined;
-  const fixed = `
-
-${footer}`;
-  const bodyBudget = cap - fixed.length;
-  if (bodyBudget <= 0) return fixed.trim().slice(0, Math.max(0, cap));
-  return content.slice(0, Math.max(0, bodyBudget - 1)).trimEnd() + `\u2026${fixed}`;
-}
-function applyFooter(content, footer, cap) {
-  if (!footer) return content;
-  if (typeof cap === "number" && cap > 0) return trimToCap(content, footer, cap);
-  return `${content.trimEnd()}
-
-${footer}`;
-}
-function buildCumulativeFooter(acc, contextWindow, newSessionThreshold, locale) {
-  const used = acc.totalCacheRead > 0 ? acc.totalCacheRead : acc.totalInput;
-  const pctNum = contextWindow > 0 ? used / contextWindow * 100 : 0;
-  const cacheDenom = acc.totalInput + acc.totalCacheRead + acc.totalCacheWrite;
-  const cachePctNum = cacheDenom > 0 ? Math.round(acc.totalCacheRead / cacheDenom * 100) : 0;
-  const modelShort = acc.model.replace(/^.*\//, "");
-  const warn2 = pctNum > newSessionThreshold ? locale === "zh-TW" ? ` \u26A0\uFE0F \u5EFA\u8B70 /new` : ` \u26A0\uFE0F /new` : "";
-  const line1 = `\u{1F4CA} ${modelShort}\uFF5C${toK(used)}k/${Math.round(contextWindow / 1e3)}k (${Math.round(pctNum)}%) \xB7 ${acc.callCount} \u8F2A${warn2}`;
-  const line2 = `  in ${toK(acc.totalInput)}k \xB7 out ${toK(acc.totalOutput)}k \xB7 cache ${cachePctNum}%`;
-  return { footer: `${line1}
-${line2}`, pctNum };
+  if (cap && joined.length > cap) {
+    return cleaned;
+  }
+  return joined;
 }
 function register(api) {
   const anyApi = api;
   const config = anyApi.pluginConfig ?? (anyApi.id && anyApi.config?.plugins?.entries?.[anyApi.id]?.config) ?? api.getConfig?.() ?? {};
-  const ttlMs = typeof config.usageTtlMs === "number" && config.usageTtlMs > 0 ? config.usageTtlMs : DEFAULT_TTL_MS;
-  const newSessionTh = typeof config.newSessionThreshold === "number" ? config.newSessionThreshold : DEFAULT_NEW_SESSION_THRESHOLD;
   const skipAgents = new Set(config.skipAgents ?? []);
   const skipChannels = new Set(config.skipChannels ?? []);
   const cap = typeof config.maxMessageLength === "number" && config.maxMessageLength > 0 ? config.maxMessageLength : void 0;
-  const locale = config.locale === "zh-TW" ? "zh-TW" : "en";
   const debug = config.debug === true;
-  const cumulative = config.cumulative !== false;
-  const hostMap = extractHostContextWindows(anyApi.config);
-  const stash = new UsageStash(ttlMs);
-  const accumulator = new SessionAccumulator();
+  const log = (msg) => console.error(`[token-footer-injector] ${msg}`);
+  const warn = (msg) => console.warn(`[token-footer-injector] WARN: ${msg}`);
   if (typeof api.on !== "function") {
     warn("api.on not available \u2014 plugin disabled");
     return;
   }
+  const lastSessionByAgent = /* @__PURE__ */ new Map();
+  const lastSessionByChannel = /* @__PURE__ */ new Map();
+  let lastSessionGlobal = null;
+  const rememberSession = (cx, sessionKey) => {
+    if (!sessionKey) return;
+    const tracked = {
+      agentId: cx?.agentId,
+      sessionKey,
+      channelId: cx?.channelId,
+      ts: Date.now()
+    };
+    if (cx?.agentId) lastSessionByAgent.set(cx.agentId, sessionKey);
+    if (cx?.channelId) lastSessionByChannel.set(`${cx.agentId ?? ""}:${cx.channelId}`, tracked);
+    lastSessionGlobal = tracked;
+  };
+  const recentSessionKey = (tracked) => {
+    if (!tracked) return "";
+    return Date.now() - tracked.ts <= 12e4 ? tracked.sessionKey : "";
+  };
   api.on("llm_output", (event, ctx) => {
     const ev = event;
     const cx = ctx;
-    if (debug) log(`llm_output FIRE sessionKey=${cx?.sessionKey} channelId=${cx?.channelId} model=${ev?.model}`);
     if (cx?.agentId && skipAgents.has(cx.agentId)) return;
     if (cx?.channelId && skipChannels.has(cx.channelId)) return;
-    const usage = normalizeUsage(ev?.usage);
-    if (!usage) {
-      if (debug) log(`llm_output SKIP: no normalized usage`);
+    const override = normalizeUsage(ev?.usage);
+    if (!override) {
+      if (debug) log(`llm_output SKIP: no usage`);
       return;
     }
-    const model = ev.model ?? "unknown";
-    const provider = ev.provider ?? "unknown";
-    if (cx?.sessionKey && cumulative) {
-      const acc = accumulator.add(cx.sessionKey, cx.channelId ?? "", usage, model, provider);
-      if (debug) log(`llm_output ACCUM session=${cx.sessionKey} calls=${acc.callCount} totalIn=${acc.totalInput} totalOut=${acc.totalOutput}`);
-    }
-    const entry = { usage, model, provider, ts: Date.now(), consumed: false };
-    const keys = [];
-    if (cx?.sessionKey) keys.push(`session:${cx.sessionKey}`);
-    if (cx?.runId) keys.push(`run:${cx.runId}`);
-    if (cx?.agentId) keys.push(`agent:${cx.agentId}`);
-    if (cx?.channelId) keys.push(`channel:${cx.channelId}`);
-    stash.set(keys, entry);
-    if (cumulative && cx?.sessionKey) {
-      const acc = accumulator.getBySession(cx.sessionKey);
-      if (acc) {
-        const cw = resolveContextWindow(acc.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
-        const { footer } = buildCumulativeFooter(acc, cw, newSessionTh, locale);
-        if (footer) {
-          const firstLine = footer.split("\n", 1)[0];
-          const texts = ev.assistantTexts;
-          const tail = Array.isArray(texts) && texts.length > 0 ? texts[texts.length - 1] : void 0;
-          if (typeof tail === "string" && !tail.includes(firstLine)) {
-            texts[texts.length - 1] = applyFooter(tail, footer, cap);
-            if (ev.lastAssistant && typeof ev.lastAssistant === "object" && typeof ev.lastAssistant.text === "string" && !ev.lastAssistant.text.includes(firstLine)) {
-              ev.lastAssistant.text = applyFooter(ev.lastAssistant.text, footer, cap);
-            }
-            if (debug) log(`llm_output MUTATE cumulative footer appended`);
-          }
-        }
-      }
-    } else if (!cumulative) {
-      const cw = resolveContextWindow(model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
-      const used = usage.cacheRead > 0 ? usage.cacheRead : usage.input;
-      const pctNum = cw > 0 ? used / cw * 100 : 0;
-      const cacheDenom = usage.input + usage.cacheRead + usage.cacheWrite;
-      const cachePct = cacheDenom > 0 ? Math.round(usage.cacheRead / cacheDenom * 100) : 0;
-      const modelShort = model.replace(/^.*\//, "");
-      const footer = `\u{1F4CA} ${modelShort}\uFF5C${toK(used)}k/${Math.round(cw / 1e3)}k (${Math.round(pctNum)}%) \xB7 ${toK(usage.input)}\u2192${toK(usage.output)}k \xB7 cache ${cachePct}%`;
-      const firstLine = footer.split("\n", 1)[0];
-      const texts = ev.assistantTexts;
-      const tail = Array.isArray(texts) && texts.length > 0 ? texts[texts.length - 1] : void 0;
-      if (typeof tail === "string" && !tail.includes(firstLine)) {
-        texts[texts.length - 1] = applyFooter(tail, footer, cap);
-        if (ev.lastAssistant && typeof ev.lastAssistant === "object" && typeof ev.lastAssistant.text === "string" && !ev.lastAssistant.text.includes(firstLine)) {
-          ev.lastAssistant.text = applyFooter(ev.lastAssistant.text, footer, cap);
-        }
+    const sess = cx?.sessionKey ?? cx?.sessionId ?? "";
+    rememberSession(cx, sess);
+    const match = findSessionMatch(cx?.agentId, { sessionKey: sess, channelId: cx?.channelId });
+    const footer = buildFooter({ entry: match?.entry ?? null, override, fallbackModel: ev.model });
+    if (!footer) return;
+    const texts = ev.assistantTexts;
+    if (Array.isArray(texts) && texts.length > 0) {
+      const idx = texts.length - 1;
+      const tail = texts[idx];
+      if (typeof tail === "string") {
+        texts[idx] = appendFooter(tail, footer, cap);
       }
     }
+    if (ev.lastAssistant && typeof ev.lastAssistant === "object" && typeof ev.lastAssistant.text === "string") {
+      ev.lastAssistant.text = appendFooter(ev.lastAssistant.text, footer, cap);
+    }
+    if (debug) log(`llm_output INJECT: ${footer}`);
   });
   api.on("message_sending", (event, ctx) => {
     const ev = event;
     const cx = ctx;
-    const chan = cx?.channelId ?? ev?.metadata?.channel;
-    if (debug) log(`message_sending FIRE channelId=${chan}`);
+    const chan = cx?.channelId ?? ev?.metadata?.channel ?? "";
     if (chan && skipChannels.has(chan)) return;
-    let footer = null;
-    if (cumulative) {
-      const acc = accumulator.getByChannel(chan ?? "");
-      if (acc) {
-        const cw = resolveContextWindow(acc.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
-        footer = buildCumulativeFooter(acc, cw, newSessionTh, locale).footer;
+    const minLen = config?.["message-sending"]?.minLen ?? 25;
+    if (!ev?.content || ev.content.length < minLen) {
+      if (debug) log(`message_sending MISS: ${ev?.content?.length ?? 0} < ${minLen}`);
+      return;
+    }
+    let sess = cx?.sessionKey ?? cx?.sessionId ?? "";
+    if (!sess && cx?.agentId) {
+      sess = lastSessionByAgent.get(cx.agentId) ?? "";
+      if (sess && debug) log(`message_sending: fallback sessionKey from llm_output: ${sess}`);
+    }
+    if (!sess && chan) {
+      sess = recentSessionKey(lastSessionByChannel.get(`${cx?.agentId ?? ""}:${chan}`));
+      if (sess && debug) log(`message_sending: fallback sessionKey from channel: ${sess}`);
+    }
+    if (!sess) {
+      sess = recentSessionKey(lastSessionGlobal);
+      if (sess && debug) log(`message_sending: fallback sessionKey from recent llm_output: ${sess}`);
+    }
+    let match = findSessionMatch(cx?.agentId, { sessionKey: sess, conversationId: cx?.conversationId, channelId: chan });
+    if (!match && cx?.conversationId) {
+      match = findSessionMatch(cx?.agentId, { conversationId: cx.conversationId, channelId: chan });
+      if (match) {
+        sess = match.sessionKey;
+        if (debug) log(`message_sending: matched sessionKey by conversationId: ${sess}`);
       }
     }
-    if (!footer) {
-      const keys2 = [];
-      if (chan) keys2.push(`channel:${chan}`);
-      const entry2 = stash.get(keys2);
-      if (!entry2) {
-        if (debug) log(`message_sending MISS`);
-        return;
-      }
-      const cw = resolveContextWindow(entry2.model, config.modelContextWindows, config.defaultContextWindow ?? DEFAULT_CONTEXT_WINDOW, hostMap);
-      const used = entry2.usage.cacheRead > 0 ? entry2.usage.cacheRead : entry2.usage.input;
-      const pctNum = cw > 0 ? used / cw * 100 : 0;
-      const cacheDenom = entry2.usage.input + entry2.usage.cacheRead + entry2.usage.cacheWrite;
-      const cachePct = cacheDenom > 0 ? Math.round(entry2.usage.cacheRead / cacheDenom * 100) : 0;
-      const modelShort = entry2.model.replace(/^.*\//, "");
-      footer = `\u{1F4CA} ${modelShort}\uFF5C${toK(used)}k/${Math.round(cw / 1e3)}k (${Math.round(pctNum)}%) \xB7 ${toK(entry2.usage.input)}\u2192${toK(entry2.usage.output)}k \xB7 cache ${cachePct}%`;
+    if (!sess && !match) {
+      if (debug) log(`message_sending SKIP: no sessionKey (chan=${chan} convId=${cx?.conversationId ?? "?"})`);
+      return;
     }
+    if (!match) {
+      if (debug) log(`message_sending SKIP: no entry for ${sess}`);
+      return;
+    }
+    const footer = buildFooter({ entry: match.entry });
     if (!footer) return;
-    const originalContent = typeof ev.content === "string" ? ev.content : "";
-    const firstLine = footer.split("\n", 1)[0];
-    if (originalContent.includes(firstLine)) {
-      if (debug) log(`message_sending SKIP: already has footer`);
+    const original = typeof ev.content === "string" ? ev.content : "";
+    if (FOOTER_RE.test(original) && original.includes(footer)) {
+      if (debug) log(`message_sending SKIP: footer current`);
       return;
     }
-    const keys = [];
-    if (chan) keys.push(`channel:${chan}`);
-    const entry = stash.get(keys);
-    if (entry?.consumed) {
-      if (debug) log(`message_sending SKIP: consumed`);
-      return;
-    }
-    if (entry) entry.consumed = true;
-    return { content: applyFooter(originalContent, footer, cap) };
+    if (debug) log(`message_sending CORRECTING footer`);
+    return { content: appendFooter(original, footer, cap) };
   }, { priority: 100 });
-  log(`v2.0 init: cumulative=${cumulative}, ttlMs=${ttlMs}, newSession=${newSessionTh}%, locale=${locale}, debug=${debug}`);
+  if (debug) log(`v6.0 init: sessions.json-backed, debug=${debug}`);
 }
