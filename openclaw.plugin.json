@@ -1,55 +1,36 @@
 {
   "id": "token-footer-injector",
+  "activation": {
+    "onStartup": true
+  },
   "name": "Token Footer Injector",
-  "version": "2.0.0",
-  "description": "Automatically appends a cumulative token-usage footer to outbound agent messages. Tracks session totals (turns, in/out tokens, cache %). The model does not write the footer; the plugin reads the real `usage` object from the llm_output hook. 100% hit-rate, 0 model tokens.",
+  "version": "6.0.0",
+  "description": "Appends token-usage footers to OpenClaw outbound messages. llm_output uses only the current event usage; delivery hooks correct from sessions.json when a reliable session match exists.",
   "entry": "./index.js",
   "configSchema": {
     "type": "object",
     "properties": {
-      "newSessionThreshold": {
+      "maxMessageLength": {
         "type": "number",
-        "description": "Context usage percentage (0-100) above which a ⚠️ /new recommendation is shown. Default 70."
-      },
-      "cumulative": {
-        "type": "boolean",
-        "description": "When true (default), footer shows session-cumulative totals. When false, shows per-turn stats only."
-      },
-      "modelContextWindows": {
-        "type": "object",
-        "description": "Map of model id → context-window size in tokens. Supports exact match and prefix match. Takes priority over host config.",
-        "additionalProperties": { "type": "number" }
-      },
-      "defaultContextWindow": {
-        "type": "number",
-        "description": "Fallback context-window size when the model is not found anywhere. Default 128000."
+        "description": "If content plus footer exceeds this length, keep the original content and skip the footer. The plugin never truncates message content."
       },
       "skipAgents": {
         "type": "array",
-        "items": { "type": "string" },
-        "description": "Agent IDs to skip. No footer is appended for these agents."
+        "items": {
+          "type": "string"
+        },
+        "description": "Agent IDs that should not receive token footers."
       },
       "skipChannels": {
         "type": "array",
-        "items": { "type": "string" },
-        "description": "Channel IDs (e.g. `discord`, `telegram`) to skip."
-      },
-      "maxMessageLength": {
-        "type": "number",
-        "description": "If set, the final content (original + footer) is hard-capped at this length. The body is trimmed first; the footer is always preserved. Useful for Discord (2000). Default: no cap."
-      },
-      "usageTtlMs": {
-        "type": "number",
-        "description": "How long a stashed usage entry is kept before it is considered stale and dropped. Default 60000 (60s)."
-      },
-      "locale": {
-        "type": "string",
-        "enum": ["en", "zh-TW"],
-        "description": "Language for warning messages. Default 'en'."
+        "items": {
+          "type": "string"
+        },
+        "description": "Channel IDs or channel labels that should not receive token footers."
       },
       "debug": {
         "type": "boolean",
-        "description": "When true, emits `[token-footer-injector]` log lines on every hook fire. Default false."
+        "description": "When true, emits [token-footer-injector] diagnostic logs."
       }
     },
     "additionalProperties": false

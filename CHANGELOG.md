@@ -4,6 +4,38 @@ All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.0] — 2026-06-02
+
+### Changed
+- Aligned package version, manifest, README, example config, and changelog with
+  the v6 implementation.
+- `llm_output` now builds its footer only from the current `event.usage`
+  payload. It no longer reads `sessions.json` at hook time, because OpenClaw
+  may not have persisted the current turn yet.
+- `message_sending` still corrects footers from `sessions.json`, but only when
+  it can match a reliable `sessionKey`, `sessionId`, `conversationId`, or keyed
+  recent agent/channel session.
+- Added `reply_payload_sending` correction so normalized payloads can use
+  payload-stage `sessionKey` / `runId` metadata before channel delivery.
+- Removed broad global recent-session fallback to reduce cross-turn and
+  cross-agent footer mismatches.
+- `skipAgents` now applies after `message_sending` successfully matches a
+  stored session, so inferred agent IDs are honored.
+- `maxMessageLength` no longer truncates content. If `content + footer` exceeds
+  the cap, the original content is preserved and the footer is skipped.
+
+### Removed
+- Removed stale documented config options from the manifest and README:
+  `format`, `contextWarnFormat`, `contextWarnThreshold`, `cumulative`,
+  `newSessionThreshold`, `usageTtlMs`, `locale`, `modelContextWindows`, and
+  `defaultContextWindow`.
+
+### Smoke tests
+- Updated coverage for stale-store avoidance in `llm_output`, no global
+  fallback in `message_sending`, post-match `skipAgents`,
+  `reply_payload_sending` correction, and over-cap no-truncation behavior.
+  28/28 pass.
+
 ## [2.0.0] — 2026-04-19
 
 ### Changed

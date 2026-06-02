@@ -201,7 +201,6 @@ function register(api) {
   }
   const lastSessionByAgent = /* @__PURE__ */ new Map();
   const lastSessionByChannel = /* @__PURE__ */ new Map();
-  let lastSessionGlobal = null;
   const rememberSession = (cx, sessionKey) => {
     if (!sessionKey) return;
     const tracked = {
@@ -212,11 +211,57 @@ function register(api) {
     };
     if (cx?.agentId) lastSessionByAgent.set(cx.agentId, sessionKey);
     if (cx?.channelId) lastSessionByChannel.set(`${cx.agentId ?? ""}:${cx.channelId}`, tracked);
-    lastSessionGlobal = tracked;
   };
   const recentSessionKey = (tracked) => {
     if (!tracked) return "";
     return Date.now() - tracked.ts <= 12e4 ? tracked.sessionKey : "";
+  };
+  const minLen = config?.["message-sending"]?.minLen ?? 25;
+  const correctContent = (content, cx, hookName) => {
+    if (!content || content.length < minLen) {
+      if (debug) log(`${hookName} MISS: ${content?.length ?? 0} < ${minLen}`);
+      return void 0;
+    }
+    let sess = cx.sessionKey ?? cx.sessionId ?? "";
+    if (!sess && cx.agentId) {
+      sess = lastSessionByAgent.get(cx.agentId) ?? "";
+      if (sess && debug) log(`${hookName}: fallback sessionKey from llm_output: ${sess}`);
+    }
+    if (!sess && cx.channelId) {
+      sess = recentSessionKey(lastSessionByChannel.get(`${cx.agentId ?? ""}:${cx.channelId}`));
+      if (sess && debug) log(`${hookName}: fallback sessionKey from channel: ${sess}`);
+    }
+    let match = null;
+    if (sess || cx.conversationId) {
+      match = findSessionMatch(cx.agentId, { sessionKey: sess, conversationId: cx.conversationId, channelId: cx.channelId });
+    }
+    if (!match && cx.conversationId) {
+      match = findSessionMatch(cx.agentId, { conversationId: cx.conversationId, channelId: cx.channelId });
+      if (match) {
+        sess = match.sessionKey;
+        if (debug) log(`${hookName}: matched sessionKey by conversationId: ${sess}`);
+      }
+    }
+    if (!sess && !match) {
+      if (debug) log(`${hookName} SKIP: no sessionKey (chan=${cx.channelId ?? ""} convId=${cx.conversationId ?? "?"})`);
+      return void 0;
+    }
+    if (!match) {
+      if (debug) log(`${hookName} SKIP: no entry for ${sess}`);
+      return void 0;
+    }
+    if (match.agentId && skipAgents.has(match.agentId)) {
+      if (debug) log(`${hookName} SKIP: agent ${match.agentId}`);
+      return void 0;
+    }
+    const footer = buildFooter({ entry: match.entry });
+    if (!footer) return void 0;
+    if (FOOTER_RE.test(content) && content.includes(footer)) {
+      if (debug) log(`${hookName} SKIP: footer current`);
+      return void 0;
+    }
+    if (debug) log(`${hookName} CORRECTING footer`);
+    return appendFooter(content, footer, cap);
   };
   api.on("llm_output", (event, ctx) => {
     const ev = event;
@@ -230,8 +275,7 @@ function register(api) {
     }
     const sess = cx?.sessionKey ?? cx?.sessionId ?? "";
     rememberSession(cx, sess);
-    const match = findSessionMatch(cx?.agentId, { sessionKey: sess, channelId: cx?.channelId });
-    const footer = buildFooter({ entry: match?.entry ?? null, override, fallbackModel: ev.model });
+    const footer = buildFooter({ entry: null, override, fallbackModel: ev.model });
     if (!footer) return;
     const texts = ev.assistantTexts;
     if (Array.isArray(texts) && texts.length > 0) {
@@ -251,49 +295,30 @@ function register(api) {
     const cx = ctx;
     const chan = cx?.channelId ?? ev?.metadata?.channel ?? "";
     if (chan && skipChannels.has(chan)) return;
-    const minLen = config?.["message-sending"]?.minLen ?? 25;
-    if (!ev?.content || ev.content.length < minLen) {
-      if (debug) log(`message_sending MISS: ${ev?.content?.length ?? 0} < ${minLen}`);
-      return;
-    }
-    let sess = cx?.sessionKey ?? cx?.sessionId ?? "";
-    if (!sess && cx?.agentId) {
-      sess = lastSessionByAgent.get(cx.agentId) ?? "";
-      if (sess && debug) log(`message_sending: fallback sessionKey from llm_output: ${sess}`);
-    }
-    if (!sess && chan) {
-      sess = recentSessionKey(lastSessionByChannel.get(`${cx?.agentId ?? ""}:${chan}`));
-      if (sess && debug) log(`message_sending: fallback sessionKey from channel: ${sess}`);
-    }
-    if (!sess) {
-      sess = recentSessionKey(lastSessionGlobal);
-      if (sess && debug) log(`message_sending: fallback sessionKey from recent llm_output: ${sess}`);
-    }
-    let match = findSessionMatch(cx?.agentId, { sessionKey: sess, conversationId: cx?.conversationId, channelId: chan });
-    if (!match && cx?.conversationId) {
-      match = findSessionMatch(cx?.agentId, { conversationId: cx.conversationId, channelId: chan });
-      if (match) {
-        sess = match.sessionKey;
-        if (debug) log(`message_sending: matched sessionKey by conversationId: ${sess}`);
-      }
-    }
-    if (!sess && !match) {
-      if (debug) log(`message_sending SKIP: no sessionKey (chan=${chan} convId=${cx?.conversationId ?? "?"})`);
-      return;
-    }
-    if (!match) {
-      if (debug) log(`message_sending SKIP: no entry for ${sess}`);
-      return;
-    }
-    const footer = buildFooter({ entry: match.entry });
-    if (!footer) return;
-    const original = typeof ev.content === "string" ? ev.content : "";
-    if (FOOTER_RE.test(original) && original.includes(footer)) {
-      if (debug) log(`message_sending SKIP: footer current`);
-      return;
-    }
-    if (debug) log(`message_sending CORRECTING footer`);
-    return { content: appendFooter(original, footer, cap) };
+    const corrected = correctContent(ev?.content, {
+      agentId: cx?.agentId,
+      sessionKey: cx?.sessionKey,
+      sessionId: cx?.sessionId,
+      conversationId: cx?.conversationId,
+      channelId: chan
+    }, "message_sending");
+    if (corrected === void 0) return;
+    return { content: corrected };
   }, { priority: 100 });
-  if (debug) log(`v6.0 init: sessions.json-backed, debug=${debug}`);
+  api.on("reply_payload_sending", (event, ctx) => {
+    const ev = event;
+    const cx = ctx;
+    const chan = cx?.channelId ?? ev?.channel ?? "";
+    if (chan && skipChannels.has(chan)) return;
+    const corrected = correctContent(ev?.payload?.text, {
+      agentId: cx?.agentId,
+      sessionKey: ev?.sessionKey ?? cx?.sessionKey,
+      sessionId: ev?.sessionId ?? cx?.sessionId,
+      conversationId: cx?.conversationId,
+      channelId: chan
+    }, "reply_payload_sending");
+    if (corrected === void 0) return;
+    return { payload: { ...ev.payload ?? {}, text: corrected } };
+  }, { priority: 100 });
+  if (debug) log(`v6.0 init: llm_output=event, delivery=sessions.json, debug=${debug}`);
 }

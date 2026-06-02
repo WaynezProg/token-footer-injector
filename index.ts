@@ -1,14 +1,13 @@
 /**
  * token-footer-injector v6.0 — OpenClaw plugin
  *
- * Reads authoritative token usage from OpenClaw's session store
- * (~/.openclaw/agents/<agentId>/sessions/sessions.json) so the footer
- * matches the output of `/status` exactly.
+ * Reads authoritative token usage from OpenClaw's session store during
+ * delivery (~/.openclaw/agents/<agentId>/sessions/sessions.json) so the
+ * final footer matches the output of `/status` exactly.
  *
  * At llm_output time, session store may not yet reflect the current turn
- * (persist happens after the hook fires), so event input is used only as a
- * context-usage fallback. Stored inputTokens are cumulative API prompt tokens
- * and must never be used as context usage.
+ * (persist happens after the hook fires), so llm_output only uses the
+ * current event.usage payload and never reads sessions.json.
  *
  * Footer format mirrors OpenClaw's formatTokenCount:
  *   📊 qwen3.6-plus | 40k/2.0m (2%) · 198→894k tokens · cache 0
@@ -114,6 +113,27 @@ interface MessageSendingCtx {
 interface MessageSendingResult {
   content?: string;
   cancel?: boolean;
+}
+
+interface ReplyPayloadSendingEvent {
+  payload?: {
+    text?: string;
+    [key: string]: unknown;
+  };
+  kind?: string;
+  channel?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  runId?: string;
+}
+
+interface ReplyPayloadSendingResult {
+  payload?: {
+    text?: string;
+    [key: string]: unknown;
+  };
+  cancel?: boolean;
+  reason?: string;
 }
 
 interface OpenClawApi {
@@ -359,11 +379,10 @@ export default function register(api: OpenClawApi): void {
     return;
   }
 
-  // Track recent sessionKeys so message_sending can find the same session even
-  // when the hook context omits agentId/sessionKey.
+  // Track recent sessionKeys so message_sending can find the same session when
+  // the hook context omits sessionKey but still carries a keyed agent/channel.
   const lastSessionByAgent = new Map<string, string>();
   const lastSessionByChannel = new Map<string, TrackedSession>();
-  let lastSessionGlobal: TrackedSession | null = null;
   const rememberSession = (cx: LlmOutputCtx, sessionKey: string) => {
     if (!sessionKey) return;
     const tracked: TrackedSession = {
@@ -374,14 +393,76 @@ export default function register(api: OpenClawApi): void {
     };
     if (cx?.agentId) lastSessionByAgent.set(cx.agentId, sessionKey);
     if (cx?.channelId) lastSessionByChannel.set(`${cx.agentId ?? ""}:${cx.channelId}`, tracked);
-    lastSessionGlobal = tracked;
   };
   const recentSessionKey = (tracked: TrackedSession | null | undefined): string => {
     if (!tracked) return "";
     return Date.now() - tracked.ts <= 120_000 ? tracked.sessionKey : "";
   };
+  const minLen = (config as any)?.["message-sending"]?.minLen ?? 25;
 
-  // llm_output: event usage is fallback only; the session store matches /status
+  const correctContent = (
+    content: string | undefined,
+    cx: {
+      agentId?: string;
+      sessionKey?: string;
+      sessionId?: string;
+      conversationId?: string;
+      channelId?: string;
+    },
+    hookName: string,
+  ): string | undefined => {
+    if (!content || content.length < minLen) {
+      if (debug) log(`${hookName} MISS: ${content?.length ?? 0} < ${minLen}`);
+      return undefined;
+    }
+
+    let sess = cx.sessionKey ?? cx.sessionId ?? "";
+    if (!sess && cx.agentId) {
+      sess = lastSessionByAgent.get(cx.agentId) ?? "";
+      if (sess && debug) log(`${hookName}: fallback sessionKey from llm_output: ${sess}`);
+    }
+    if (!sess && cx.channelId) {
+      sess = recentSessionKey(lastSessionByChannel.get(`${cx.agentId ?? ""}:${cx.channelId}`));
+      if (sess && debug) log(`${hookName}: fallback sessionKey from channel: ${sess}`);
+    }
+
+    let match: SessionMatch | null = null;
+    if (sess || cx.conversationId) {
+      match = findSessionMatch(cx.agentId, { sessionKey: sess, conversationId: cx.conversationId, channelId: cx.channelId });
+    }
+    if (!match && cx.conversationId) {
+      match = findSessionMatch(cx.agentId, { conversationId: cx.conversationId, channelId: cx.channelId });
+      if (match) {
+        sess = match.sessionKey;
+        if (debug) log(`${hookName}: matched sessionKey by conversationId: ${sess}`);
+      }
+    }
+    if (!sess && !match) {
+      if (debug) log(`${hookName} SKIP: no sessionKey (chan=${cx.channelId ?? ""} convId=${cx.conversationId ?? "?"})`);
+      return undefined;
+    }
+    if (!match) {
+      if (debug) log(`${hookName} SKIP: no entry for ${sess}`);
+      return undefined;
+    }
+    if (match.agentId && skipAgents.has(match.agentId)) {
+      if (debug) log(`${hookName} SKIP: agent ${match.agentId}`);
+      return undefined;
+    }
+
+    const footer = buildFooter({ entry: match.entry });
+    if (!footer) return undefined;
+
+    if (FOOTER_RE.test(content) && content.includes(footer)) {
+      if (debug) log(`${hookName} SKIP: footer current`);
+      return undefined;
+    }
+    if (debug) log(`${hookName} CORRECTING footer`);
+    return appendFooter(content, footer, cap);
+  };
+
+  // llm_output: use only the current event usage. sessions.json is updated
+  // after this hook, so reading it here can inject stale previous-turn numbers.
   api.on("llm_output", (event: unknown, ctx: unknown) => {
     const ev = event as LlmOutputEvent;
     const cx = ctx as LlmOutputCtx;
@@ -393,8 +474,7 @@ export default function register(api: OpenClawApi): void {
 
     const sess = cx?.sessionKey ?? cx?.sessionId ?? "";
     rememberSession(cx, sess);
-    const match = findSessionMatch(cx?.agentId, { sessionKey: sess, channelId: cx?.channelId });
-    const footer = buildFooter({ entry: match?.entry ?? null, override, fallbackModel: ev.model });
+    const footer = buildFooter({ entry: null, override, fallbackModel: ev.model });
     if (!footer) return;
 
     const texts = ev.assistantTexts;
@@ -417,44 +497,32 @@ export default function register(api: OpenClawApi): void {
     const cx = ctx as MessageSendingCtx;
     const chan = cx?.channelId ?? ev?.metadata?.channel ?? "";
     if (chan && skipChannels.has(chan)) return;
-    const minLen = (config as any)?.["message-sending"]?.minLen ?? 25;
-    if (!ev?.content || ev.content.length < minLen) { if (debug) log(`message_sending MISS: ${ev?.content?.length ?? 0} < ${minLen}`); return; }
-
-    let sess = cx?.sessionKey ?? cx?.sessionId ?? "";
-    if (!sess && cx?.agentId) {
-      sess = lastSessionByAgent.get(cx.agentId) ?? "";
-      if (sess && debug) log(`message_sending: fallback sessionKey from llm_output: ${sess}`);
-    }
-    if (!sess && chan) {
-      sess = recentSessionKey(lastSessionByChannel.get(`${cx?.agentId ?? ""}:${chan}`));
-      if (sess && debug) log(`message_sending: fallback sessionKey from channel: ${sess}`);
-    }
-    if (!sess) {
-      sess = recentSessionKey(lastSessionGlobal);
-      if (sess && debug) log(`message_sending: fallback sessionKey from recent llm_output: ${sess}`);
-    }
-    let match = findSessionMatch(cx?.agentId, { sessionKey: sess, conversationId: cx?.conversationId, channelId: chan });
-    if (!match && cx?.conversationId) {
-      match = findSessionMatch(cx?.agentId, { conversationId: cx.conversationId, channelId: chan });
-      if (match) {
-        sess = match.sessionKey;
-        if (debug) log(`message_sending: matched sessionKey by conversationId: ${sess}`);
-      }
-    }
-    if (!sess && !match) { if (debug) log(`message_sending SKIP: no sessionKey (chan=${chan} convId=${cx?.conversationId ?? "?"})`); return; }
-    if (!match) { if (debug) log(`message_sending SKIP: no entry for ${sess}`); return; }
-
-    const footer = buildFooter({ entry: match.entry });
-    if (!footer) return;
-
-    const original = typeof ev.content === "string" ? ev.content : "";
-    if (FOOTER_RE.test(original) && original.includes(footer)) {
-      if (debug) log(`message_sending SKIP: footer current`);
-      return;
-    }
-    if (debug) log(`message_sending CORRECTING footer`);
-    return { content: appendFooter(original, footer, cap) };
+    const corrected = correctContent(ev?.content, {
+      agentId: cx?.agentId,
+      sessionKey: cx?.sessionKey,
+      sessionId: cx?.sessionId,
+      conversationId: cx?.conversationId,
+      channelId: chan,
+    }, "message_sending");
+    if (corrected === undefined) return;
+    return { content: corrected };
   }, { priority: 100 });
 
-  if (debug) log(`v6.0 init: sessions.json-backed, debug=${debug}`);
+  api.on("reply_payload_sending", (event: unknown, ctx: unknown): ReplyPayloadSendingResult | void => {
+    const ev = event as ReplyPayloadSendingEvent;
+    const cx = ctx as MessageSendingCtx;
+    const chan = cx?.channelId ?? ev?.channel ?? "";
+    if (chan && skipChannels.has(chan)) return;
+    const corrected = correctContent(ev?.payload?.text, {
+      agentId: cx?.agentId,
+      sessionKey: ev?.sessionKey ?? cx?.sessionKey,
+      sessionId: ev?.sessionId ?? cx?.sessionId,
+      conversationId: cx?.conversationId,
+      channelId: chan,
+    }, "reply_payload_sending");
+    if (corrected === undefined) return;
+    return { payload: { ...(ev.payload ?? {}), text: corrected } };
+  }, { priority: 100 });
+
+  if (debug) log(`v6.0 init: llm_output=event, delivery=sessions.json, debug=${debug}`);
 }

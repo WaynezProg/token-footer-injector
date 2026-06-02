@@ -1,7 +1,7 @@
 {
   "name": "token-footer-injector",
-  "version": "2.0.0",
-  "description": "OpenClaw plugin: deterministic token-usage footer injection. Appends a '📊 model | used/max · in→out · cache%' line to every outbound agent message, sourced from the real usage object — no model tokens spent.",
+  "version": "6.0.0",
+  "description": "OpenClaw plugin: deterministic token-usage footer injection backed by current llm_output usage and sessions.json delivery correction.",
   "type": "commonjs",
   "main": "./index.js",
   "license": "MIT",

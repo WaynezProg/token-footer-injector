@@ -70,6 +70,13 @@ function sendWithoutSessionContext(hooks, content) {
   );
 }
 
+function sendPayload(hooks, text, sessionKey) {
+  return hooks.reply_payload_sending(
+    { payload: { text }, kind: "final", channel: "discord", sessionKey, runId: "r1" },
+    { channelId: "discord" },
+  );
+}
+
 const oldStateDir = process.env.OPENCLAW_STATE_DIR;
 const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "token-footer-smoke-"));
 process.env.OPENCLAW_STATE_DIR = stateDir;
@@ -115,9 +122,10 @@ try {
     register(api);
     ok("llm_output registered", typeof hooks.llm_output === "function");
     ok("message_sending registered", typeof hooks.message_sending === "function");
+    ok("reply_payload_sending registered", typeof hooks.reply_payload_sending === "function");
   }
 
-  console.log("2. stored session overrides stale llm_output usage");
+  console.log("2. llm_output ignores stale session store");
   {
     writeSessionEntry(stateDir, "main", SESSION, STORED_ENTRY);
     const { api, hooks } = makeApi({});
@@ -128,9 +136,9 @@ try {
       "qwen3.6-plus",
       SESSION,
     );
-    contains("footer uses stored context total", result.text, "22k/2.0m (1%)");
-    contains("footer uses stored in/out", result.text, "22k→153 tokens");
-    notContains("footer does not expose stale 183k", result.text, "183k");
+    contains("llm_output uses event context", result.text, "183k/2.0m (9%)");
+    contains("llm_output uses event in/out", result.text, "183k→466 tokens");
+    notContains("llm_output does not use stored previous total", result.text, "22k");
   }
 
   console.log("3. message_sending corrects an existing stale footer");
@@ -176,7 +184,7 @@ try {
     notContains("footer does not use cumulative 100k as context", result.text, "100k/2.0m");
   }
 
-  console.log("6. message_sending can correct via recent llm_output session");
+  console.log("6. message_sending does not use global recent-session fallback");
   {
     writeSessionEntry(stateDir, "main", SESSION, PARTIAL_ENTRY_WITH_CUMULATIVE_INPUT);
     const { api, hooks } = makeApi({});
@@ -190,10 +198,7 @@ try {
     writeSessionEntry(stateDir, "main", SESSION, CURRENT_ENTRY);
     const stale = "final answer long enough\n\n📊 qwen3.6-plus | 100k/2.0m (5%) · 100k→981 tokens · cache 0";
     const result = sendWithoutSessionContext(hooks, stale);
-    ok("message_sending returns corrected content without explicit session", result && typeof result.content === "string");
-    contains("recent fallback corrected context total", result.content, "53k/2.0m (3%)");
-    contains("recent fallback corrected cumulative in/out", result.content, "100k→981 tokens");
-    notContains("recent fallback removes stale context", result.content, "100k/2.0m");
+    ok("message_sending skips without explicit session or keyed fallback", result === undefined);
   }
 
   console.log("7. message_sending can infer agentId from sessionKey");
@@ -234,7 +239,43 @@ try {
     ok("skipChannels leaves text unchanged", result.text === "response text");
   }
 
-  console.log("9. over-cap messages keep original content and skip footer");
+  console.log("9. skipAgents applies after message_sending session match");
+  {
+    const COO_SESSION = "agent:coo:discord:channel:1466368503803281704";
+    writeSessionEntry(stateDir, "coo", COO_SESSION, {
+      model: "gpt-5.5",
+      modelProvider: "openai-codex",
+      inputTokens: 45000,
+      outputTokens: 1200,
+      cacheRead: 85000,
+      cacheWrite: 0,
+      totalTokens: 45000,
+      contextTokens: 400000,
+      updatedAt: Date.now(),
+    });
+    const { api, hooks } = makeApi({ skipAgents: ["coo"] });
+    register(api);
+    const result = hooks.message_sending(
+      { to: "channel", content: "coo answer long enough for footer correction", metadata: { channel: "discord" } },
+      { sessionKey: COO_SESSION, channelId: "channel:1466368503803281704" },
+    );
+    ok("matched skipped agent receives no footer", result === undefined);
+  }
+
+  console.log("10. reply_payload_sending corrects with event sessionKey");
+  {
+    writeSessionEntry(stateDir, "main", SESSION, CURRENT_ENTRY);
+    const { api, hooks } = makeApi({});
+    register(api);
+    const stale = "payload answer long enough\n\n📊 qwen3.6-plus | 22k/2.0m (1%) · 22k→153 tokens · cache 0";
+    const result = sendPayload(hooks, stale, SESSION);
+    ok("reply_payload_sending returns corrected payload", result && result.payload && typeof result.payload.text === "string");
+    contains("payload correction uses current stored total", result.payload.text, "53k/2.0m (3%)");
+    contains("payload correction uses current stored in/out", result.payload.text, "100k→981 tokens");
+    notContains("payload correction removes stale total", result.payload.text, "22k");
+  }
+
+  console.log("11. over-cap messages keep original content and skip footer");
   {
     writeSessionEntry(stateDir, "main", SESSION, STORED_ENTRY);
     const { api, hooks } = makeApi({ maxMessageLength: 80 });
