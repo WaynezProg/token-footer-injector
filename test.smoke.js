@@ -46,12 +46,12 @@ function writeSessionEntry(stateDir, agentId, sessionKey, entry) {
   fs.writeFileSync(path.join(dir, "sessions.json"), JSON.stringify({ [sessionKey]: entry }, null, 2));
 }
 
-function fire(hooks, usage, model, sessionKey, assistantText = "response text") {
+function fire(hooks, usage, model, sessionKey, assistantText = "response text", ctxOverrides = {}, eventOverrides = {}) {
   const texts = [assistantText];
   const lastAssistant = { text: assistantText };
   hooks.llm_output(
-    { model, provider: "qwen", usage, assistantTexts: texts, lastAssistant },
-    { runId: "r1", agentId: "main", sessionKey, channelId: "discord" },
+    { model, provider: "qwen", usage, assistantTexts: texts, lastAssistant, ...eventOverrides },
+    { runId: "r1", agentId: "main", sessionKey, channelId: "discord", ...ctxOverrides },
   );
   return { text: texts[0], lastAssistantText: lastAssistant.text };
 }
@@ -154,7 +154,23 @@ try {
     notContains("corrected footer removes stale 183k", result.content, "183k");
   }
 
-  console.log("4. missing store falls back to llm_output usage");
+  console.log("4. llm_output prefers hook context budget");
+  {
+    const { api, hooks } = makeApi({});
+    register(api);
+    const result = fire(
+      hooks,
+      { input: 5000, output: 200, cacheRead: 0, cacheWrite: 0 },
+      "qwen3.6-plus",
+      "session:budget",
+      "response text",
+      { contextTokenBudget: 100000 },
+    );
+    contains("llm_output uses contextTokenBudget", result.text, "5.0k/100k (5%)");
+    notContains("llm_output avoids hardcoded qwen window", result.text, "5.0k/2.0m");
+  }
+
+  console.log("5. missing store falls back to llm_output usage");
   {
     const { api, hooks } = makeApi({});
     register(api);
@@ -168,7 +184,7 @@ try {
     contains("fallback footer uses event in/out", result.text, "5.0k→200 tokens");
   }
 
-  console.log("5. partial store does not use cumulative input as context");
+  console.log("6. partial store does not use cumulative input as context");
   {
     writeSessionEntry(stateDir, "main", SESSION, PARTIAL_ENTRY_WITH_CUMULATIVE_INPUT);
     const { api, hooks } = makeApi({});
@@ -184,7 +200,7 @@ try {
     notContains("footer does not use cumulative 100k as context", result.text, "100k/2.0m");
   }
 
-  console.log("6. message_sending does not use global recent-session fallback");
+  console.log("7. message_sending does not use global recent-session fallback");
   {
     writeSessionEntry(stateDir, "main", SESSION, PARTIAL_ENTRY_WITH_CUMULATIVE_INPUT);
     const { api, hooks } = makeApi({});
@@ -201,7 +217,7 @@ try {
     ok("message_sending skips without explicit session or keyed fallback", result === undefined);
   }
 
-  console.log("7. message_sending can infer agentId from sessionKey");
+  console.log("8. message_sending can infer agentId from sessionKey");
   {
     const COO_SESSION = "agent:coo:discord:channel:1466368503803281704";
     writeSessionEntry(stateDir, "coo", COO_SESSION, {
@@ -226,7 +242,7 @@ try {
     contains("coo footer uses coo in/out", result.content, "45k→1.2k tokens");
   }
 
-  console.log("8. skipChannels suppresses footer");
+  console.log("9. skipChannels suppresses footer");
   {
     const { api, hooks } = makeApi({ skipChannels: ["discord"] });
     register(api);
@@ -239,7 +255,17 @@ try {
     ok("skipChannels leaves text unchanged", result.text === "response text");
   }
 
-  console.log("9. skipAgents applies after message_sending session match");
+  console.log("10. minContentLength is configurable");
+  {
+    writeSessionEntry(stateDir, "main", SESSION, STORED_ENTRY);
+    const { api, hooks } = makeApi({ minContentLength: 1 });
+    register(api);
+    const result = send(hooks, "short", SESSION);
+    ok("short content can receive footer when configured", result && typeof result.content === "string");
+    contains("short content footer added", result.content, "22k/2.0m (1%)");
+  }
+
+  console.log("11. skipAgents applies after message_sending session match");
   {
     const COO_SESSION = "agent:coo:discord:channel:1466368503803281704";
     writeSessionEntry(stateDir, "coo", COO_SESSION, {
@@ -262,7 +288,7 @@ try {
     ok("matched skipped agent receives no footer", result === undefined);
   }
 
-  console.log("10. reply_payload_sending corrects with event sessionKey");
+  console.log("12. reply_payload_sending corrects with event sessionKey");
   {
     writeSessionEntry(stateDir, "main", SESSION, CURRENT_ENTRY);
     const { api, hooks } = makeApi({});
@@ -275,7 +301,7 @@ try {
     notContains("payload correction removes stale total", result.payload.text, "22k");
   }
 
-  console.log("11. over-cap messages keep original content and skip footer");
+  console.log("13. over-cap messages keep original content and skip footer");
   {
     writeSessionEntry(stateDir, "main", SESSION, STORED_ENTRY);
     const { api, hooks } = makeApi({ maxMessageLength: 80 });

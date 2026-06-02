@@ -8,7 +8,8 @@ data.
 
 ## Current Behavior
 
-- `llm_output` uses only the current hook's `event.usage`.
+- `llm_output` uses only the current hook's `event.usage` plus
+  hook-provided `contextTokenBudget` / `contextWindowReferenceTokens`.
 - `llm_output` does not read `sessions.json`, because the session store may
   still contain previous-turn data at that point.
 - `message_sending` and `reply_payload_sending` use `sessions.json` only after
@@ -41,6 +42,7 @@ Register the plugin in `openclaw.json`:
           "skipAgents": [],
           "skipChannels": [],
           "maxMessageLength": 1900,
+          "minContentLength": 25,
           "debug": false
         }
       }
@@ -59,6 +61,7 @@ Register the plugin in `openclaw.json`:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `maxMessageLength` | `number` | unset | If `content + footer` exceeds this length, keep content and skip footer. |
+| `minContentLength` | `number` | `25` | Minimum content length required before delivery-stage hooks add or correct a footer. |
 | `skipAgents` | `string[]` | `[]` | Agent IDs that should not receive a footer. |
 | `skipChannels` | `string[]` | `[]` | Channel IDs or channel labels that should not receive a footer. |
 | `debug` | `boolean` | `false` | Emit `[token-footer-injector]` diagnostic logs. |
@@ -70,6 +73,7 @@ Unknown config keys are rejected by the manifest.
 ```text
 llm_output
   normalize event.usage
+  prefer hook-provided context budget
   remember keyed agent/channel session hints
   append footer from current event usage only
 

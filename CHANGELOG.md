@@ -7,6 +7,15 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [6.0.0] — 2026-06-02
 
 ### Changed
+- `llm_output` now prefers hook-provided `contextTokenBudget` /
+  `contextWindowReferenceTokens` over the built-in context-window fallback.
+  This keeps first-pass footers aligned with OpenClaw's effective agent/model
+  cap.
+- Promoted the delivery-stage short-content threshold to config
+  `minContentLength` (default 25) and documented it in the manifest, README,
+  and example config.
+- Removed `entry` from `openclaw.plugin.json`; runtime entrypoint remains in
+  `package.json` (`main` / `openclaw.extensions`).
 - Aligned package version, manifest, README, example config, and changelog with
   the v6 implementation.
 - `llm_output` now builds its footer only from the current `event.usage`
@@ -33,8 +42,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Smoke tests
 - Updated coverage for stale-store avoidance in `llm_output`, no global
   fallback in `message_sending`, post-match `skipAgents`,
-  `reply_payload_sending` correction, and over-cap no-truncation behavior.
-  28/28 pass.
+  `reply_payload_sending` correction, hook context budget preference,
+  configurable `minContentLength`, and over-cap no-truncation behavior.
+  32/32 pass.
 
 ## [2.0.0] — 2026-04-19
 

@@ -157,7 +157,7 @@ function formatTokenCount(value) {
   return String(Math.round(safe));
 }
 function buildFooter(params) {
-  const { entry, override, fallbackModel } = params;
+  const { entry, override, fallbackModel, contextTokenBudget } = params;
   const modelFull = entry?.modelProvider && entry?.model ? `${entry.modelProvider}/${entry.model}` : entry?.model ?? fallbackModel ?? "unknown";
   const modelShort = modelFull.replace(/^.*\//, "");
   const storedTotal = typeof entry?.totalTokens === "number" && entry.totalTokens > 0 ? entry.totalTokens : 0;
@@ -166,7 +166,7 @@ function buildFooter(params) {
   const output = hasFreshStoredContext && typeof entry?.outputTokens === "number" ? entry.outputTokens : override?.output ?? 0;
   const cacheRead = hasFreshStoredContext && typeof entry?.cacheRead === "number" ? entry.cacheRead : override?.cacheRead ?? 0;
   const cacheWrite = hasFreshStoredContext && typeof entry?.cacheWrite === "number" ? entry.cacheWrite : override?.cacheWrite ?? 0;
-  const window = entry?.contextTokens && entry.contextTokens > 0 ? entry.contextTokens : getContextWindow(modelFull);
+  const window = contextTokenBudget && contextTokenBudget > 0 ? contextTokenBudget : entry?.contextTokens && entry.contextTokens > 0 ? entry.contextTokens : getContextWindow(modelFull);
   const usage = storedTotal || override?.input || 0;
   if (usage === 0 && input === 0 && output === 0) return null;
   const pct = window > 0 ? Math.min(999, Math.round(usage / window * 100)) : 0;
@@ -216,7 +216,7 @@ function register(api) {
     if (!tracked) return "";
     return Date.now() - tracked.ts <= 12e4 ? tracked.sessionKey : "";
   };
-  const minLen = config?.["message-sending"]?.minLen ?? 25;
+  const minLen = typeof config.minContentLength === "number" && config.minContentLength >= 0 ? config.minContentLength : 25;
   const correctContent = (content, cx, hookName) => {
     if (!content || content.length < minLen) {
       if (debug) log(`${hookName} MISS: ${content?.length ?? 0} < ${minLen}`);
@@ -275,7 +275,8 @@ function register(api) {
     }
     const sess = cx?.sessionKey ?? cx?.sessionId ?? "";
     rememberSession(cx, sess);
-    const footer = buildFooter({ entry: null, override, fallbackModel: ev.model });
+    const contextTokenBudget = toNum(cx?.contextTokenBudget) || toNum(ev?.contextTokenBudget) || toNum(cx?.contextWindowReferenceTokens) || toNum(ev?.contextWindowReferenceTokens) || void 0;
+    const footer = buildFooter({ entry: null, override, fallbackModel: ev.model, contextTokenBudget });
     if (!footer) return;
     const texts = ev.assistantTexts;
     if (Array.isArray(texts) && texts.length > 0) {

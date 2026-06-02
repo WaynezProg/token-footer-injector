@@ -75,6 +75,7 @@ interface TrackedSession {
 
 interface PluginConfig {
   maxMessageLength?: number;
+  minContentLength?: number;
   skipAgents?: string[];
   skipChannels?: string[];
   debug?: boolean;
@@ -88,6 +89,8 @@ interface LlmOutputEvent {
   assistantTexts?: string[];
   lastAssistant?: { text?: string; [key: string]: unknown } | null;
   usage?: RawUsage;
+  contextTokenBudget?: number;
+  contextWindowReferenceTokens?: number;
 }
 
 interface LlmOutputCtx {
@@ -95,6 +98,8 @@ interface LlmOutputCtx {
   sessionKey?: string;
   sessionId?: string;
   channelId?: string;
+  contextTokenBudget?: number;
+  contextWindowReferenceTokens?: number;
 }
 
 interface MessageSendingEvent {
@@ -289,8 +294,9 @@ function buildFooter(params: {
   entry: StoredEntry | null;
   override?: NormalizedUsage | null;
   fallbackModel?: string;
+  contextTokenBudget?: number;
 }): string | null {
-  const { entry, override, fallbackModel } = params;
+  const { entry, override, fallbackModel, contextTokenBudget } = params;
 
   const modelFull = entry?.modelProvider && entry?.model
     ? `${entry.modelProvider}/${entry.model}`
@@ -315,7 +321,9 @@ function buildFooter(params: {
     ? entry.cacheWrite
     : override?.cacheWrite ?? 0;
 
-  const window = (entry?.contextTokens && entry.contextTokens > 0)
+  const window = (contextTokenBudget && contextTokenBudget > 0)
+    ? contextTokenBudget
+    : (entry?.contextTokens && entry.contextTokens > 0)
     ? entry.contextTokens
     : getContextWindow(modelFull);
 
@@ -398,7 +406,9 @@ export default function register(api: OpenClawApi): void {
     if (!tracked) return "";
     return Date.now() - tracked.ts <= 120_000 ? tracked.sessionKey : "";
   };
-  const minLen = (config as any)?.["message-sending"]?.minLen ?? 25;
+  const minLen = typeof config.minContentLength === "number" && config.minContentLength >= 0
+    ? config.minContentLength
+    : 25;
 
   const correctContent = (
     content: string | undefined,
@@ -474,7 +484,13 @@ export default function register(api: OpenClawApi): void {
 
     const sess = cx?.sessionKey ?? cx?.sessionId ?? "";
     rememberSession(cx, sess);
-    const footer = buildFooter({ entry: null, override, fallbackModel: ev.model });
+    const contextTokenBudget =
+      toNum((cx as Record<string, unknown>)?.contextTokenBudget)
+      || toNum((ev as Record<string, unknown>)?.contextTokenBudget)
+      || toNum((cx as Record<string, unknown>)?.contextWindowReferenceTokens)
+      || toNum((ev as Record<string, unknown>)?.contextWindowReferenceTokens)
+      || undefined;
+    const footer = buildFooter({ entry: null, override, fallbackModel: ev.model, contextTokenBudget });
     if (!footer) return;
 
     const texts = ev.assistantTexts;

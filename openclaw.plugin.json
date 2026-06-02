@@ -5,14 +5,17 @@
   },
   "name": "Token Footer Injector",
   "version": "6.0.0",
-  "description": "Appends token-usage footers to OpenClaw outbound messages. llm_output uses only the current event usage; delivery hooks correct from sessions.json when a reliable session match exists.",
-  "entry": "./index.js",
+  "description": "Appends token-usage footers to OpenClaw outbound messages. llm_output uses only the current event usage and hook-provided context budget; delivery hooks correct from sessions.json when a reliable session match exists.",
   "configSchema": {
     "type": "object",
     "properties": {
       "maxMessageLength": {
         "type": "number",
         "description": "If content plus footer exceeds this length, keep the original content and skip the footer. The plugin never truncates message content."
+      },
+      "minContentLength": {
+        "type": "number",
+        "description": "Minimum content length required before delivery-stage hooks add or correct a footer. Default 25."
       },
       "skipAgents": {
         "type": "array",

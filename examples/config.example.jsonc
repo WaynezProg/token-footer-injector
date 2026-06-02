@@ -18,6 +18,10 @@
           // footer. The plugin never truncates message content.
           "maxMessageLength": 1900,
 
+          // Minimum content length before delivery-stage hooks add or correct
+          // a footer. Keep this low only if short replies should carry stats.
+          "minContentLength": 25,
+
           // Emit diagnostic logs for hook matching and footer correction.
           "debug": false
         }
